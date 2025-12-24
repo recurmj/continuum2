@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Continuum</title>
+  <style>
+    :root { --fg:#0b0b0c; --muted:#6b6f76; --bg:#ffffff; --card:#f6f7f9; --line:#e7e9ee; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color:var(--fg); background:var(--bg); }
+    .wrap { max-width:1100px; margin:0 auto; padding:28px 18px 50px; }
+    h1 { font-size:34px; margin:0 0 6px; letter-spacing:-0.02em; }
+    .sub { color:var(--muted); margin-bottom:18px; line-height:1.35; }
+    .grid { display:grid; grid-template-columns: 1.15fr 0.85fr; gap:14px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px 14px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:baseline; }
+    .kpi { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; }
+    .val { font-size:20px; font-weight:600; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:8px 8px; border-bottom:1px solid var(--line); text-align:left; }
+    th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:0.06em; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:12px; }
+    .log { max-height:360px; overflow:auto; background:#fff; border:1px solid var(--line); border-radius:12px; }
+    .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:#fff; border:1px solid var(--line); font-size:12px; color:var(--muted); }
+    .ok { color:#0a6; }
+    .bad { color:#c33; }
+    .graph { width:100%; height:310px; border:1px solid var(--line); background:#fff; border-radius:12px; }
+    .small { font-size:12px; color:var(--muted); }
+    a { color:inherit; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Continuum</h1>
+    <div class="sub">
+      A live circular economy where money moves only under <b>bounded, revocable consent</b> — running continuously without custody or trusted bots.
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <div class="kpi">Status</div>
+            <div class="val"><span id="status" class="pill">connecting…</span></div>
+          </div>
+          <div>
+            <div class="kpi">Running for</div>
+            <div class="val" id="uptime">—</div>
+          </div>
+          <div>
+            <div class="kpi">Tick</div>
+            <div class="val" id="tick">—</div>
+          </div>
+          <div>
+            <div class="kpi">Tick rate</div>
+            <div class="val" id="tickrate">—</div>
+          </div>
+        </div>
+
+        <div style="height:14px;"></div>
+        <div class="kpi">Flow view</div>
+        <svg id="graph" class="graph" viewBox="0 0 900 360" preserveAspectRatio="none"></svg>
+        <div class="small" style="margin-top:8px;">
+          Public crank advances time; agents execute PPO pulls as the authorized grantee (caller == receiver).
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <div class="kpi">Shock test</div>
+            <div class="val" id="shock">armed (tick 5)</div>
+          </div>
+          <div class="pill" id="contracts">contracts: —</div>
+        </div>
+
+        <div style="height:10px;"></div>
+        <div class="kpi">Balances</div>
+        <div style="height:6px;"></div>
+        <div class="log">
+          <table id="balances">
+            <thead><tr><th>Agent</th><th>Balance</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div style="height:14px;"></div>
+        <div class="kpi">Recent events</div>
+        <div style="height:6px;"></div>
+        <div class="log">
+          <table id="events">
+            <thead><tr><th>Type</th><th>Details</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:14px;"></div>
+    <div class="small">
+      Tip: open <span class="mono">/state</span> to inspect the live JSON snapshot.
+    </div>
+  </div>
+
+<script>
+const fmt = (n) => {
+  try {
+    // balances are 18 decimals
+    const s = BigInt(n).toString();
+    if (s.length <= 18) return "0." + s.padStart(18,"0").slice(0,6);
+    const head = s.slice(0, s.length-18);
+    const tail = s.slice(s.length-18, s.length-12);
+    return head + "." + tail;
+  } catch { return String(n); }
+};
+
+function uptimeStr(sec) {
+  const d = Math.floor(sec/86400);
+  sec -= d*86400;
+  const h = Math.floor(sec/3600);
+  sec -= h*3600;
+  const m = Math.floor(sec/60);
+  const s = sec - m*60;
+  const parts = [];
+  if (d) parts.push(d+"d");
+  if (d || h) parts.push(h+"h");
+  parts.push(m+"m");
+  parts.push(s+"s");
+  return parts.join(" ");
+}
+
+function short(a) {
+  if (!a) return "";
+  return a.slice(0,6) + "…" + a.slice(-4);
+}
+
+function setStatus(ok) {
+  const el = document.getElementById("status");
+  el.textContent = ok ? "live" : "offline";
+  el.className = "pill " + (ok ? "ok" : "bad");
+}
+
+function renderBalances(state) {
+  const rows = [];
+  const add = (name, obj) => rows.push({ name, bal: obj.balance, addr: obj.address });
+  if (state.agents?.treasury) add("treasury", state.agents.treasury);
+  if (state.agents?.employer) add("employer", state.agents.employer);
+  (state.agents?.merchants ?? []).forEach((m,i)=>add("merchant"+(i+1), m));
+  (state.agents?.subs ?? []).forEach((s,i)=>add("sub"+(i+1), s));
+  (state.agents?.workers ?? []).forEach((w,i)=>add("worker"+(i+1), w));
+
+  const tb = document.querySelector("#balances tbody");
+  tb.innerHTML = rows.map(r =>
+    `<tr><td><span class="mono">${r.name}</span> <span class="small">(${short(r.addr)})</span></td><td class="mono">${fmt(r.bal)}</td></tr>`
+  ).join("");
+}
+
+function renderEvents(state) {
+  const events = (state.recentEvents ?? []).slice(-20).reverse();
+  const tb = document.querySelector("#events tbody");
+  tb.innerHTML = events.map(ev => {
+    const type = ev.type ?? "Event";
+    let details = "";
+    if (type === "PullExecuted") {
+      details = `grantor ${short(ev.grantor)} → grantee ${short(ev.grantee)} | amt ${fmt(ev.amount)}`;
+    } else if (type === "PullExecutedDirect") {
+      details = `grantor ${short(ev.grantor)} → grantee ${short(ev.grantee)} | amt ${fmt(ev.amount)}`;
+    } else if (type === "AuthorizationRevoked") {
+      details = `auth ${short(ev.authHash)} revoked by ${short(ev.grantor)}`;
+    } else if (type === "EdgeFailed") {
+      details = `edge ${ev.edgeId} failed: ${ev.reason || "revert"}`;
+    } else if (type === "EdgeExecuted") {
+      details = `edge ${ev.edgeId} executed | amt ${fmt(ev.amount)}`;
+    } else {
+      details = (ev.tx ? `tx ${short(ev.tx)}` : "");
+    }
+    return `<tr><td class="mono">${type}</td><td class="mono">${details}</td></tr>`;
+  }).join("");
+}
+
+function renderGraph(state) {
+  const svg = document.getElementById("graph");
+  const W = 900, H = 360;
+  svg.innerHTML = "";
+
+  // Nodes
+  const nodes = [];
+  const addNode = (id, label, x, y) => nodes.push({id,label,x,y});
+
+  addNode("employer","Employer", 170, 90);
+  addNode("treasury","Treasury", 170, 270);
+
+  // workers left to right
+  const wcount = (state.agents?.workers ?? []).length || 10;
+  for (let i=0;i<wcount;i++){
+    const x = 420 + (i%5)*90;
+    const y = 60 + Math.floor(i/5)*90;
+    addNode("w"+i, "W"+(i+1), x, y);
+  }
+
+  const mcount = (state.agents?.merchants ?? []).length || 3;
+  for (let i=0;i<mcount;i++){
+    addNode("m"+i, "M"+(i+1), 700, 210 + i*45);
+  }
+
+  const scount = (state.agents?.subs ?? []).length || 2;
+  for (let i=0;i<scount;i++){
+    addNode("s"+i, "S"+(i+1), 700, 80 + i*45);
+  }
+
+  // Edges (conceptual)
+  const edges = [];
+  // employer -> workers (salary pulled by workers)
+  for (let i=0;i<wcount;i++) edges.push(["employer","w"+i,"salary"]);
+  // workers -> merchants
+  for (let i=0;i<wcount;i++) for (let j=0;j<mcount;j++) edges.push(["w"+i,"m"+j,"spend"]);
+  // workers -> subs
+  for (let i=0;i<wcount;i++) for (let j=0;j<scount;j++) edges.push(["w"+i,"s"+j,"sub"]);
+  // merchants -> treasury
+  for (let j=0;j<mcount;j++) edges.push(["m"+j,"treasury","remit"]);
+  // treasury -> employer
+  edges.push(["treasury","employer","drip"]);
+
+  const nodeById = Object.fromEntries(nodes.map(n=>[n.id,n]));
+
+  const line = (x1,y1,x2,y2) => {
+    const p = document.createElementNS("http://www.w3.org/2000/svg","path");
+    const dx = (x2-x1), dy=(y2-y1);
+    const c1x = x1 + dx*0.35, c1y = y1 + dy*0.05;
+    const c2x = x1 + dx*0.65, c2y = y1 + dy*0.95;
+    p.setAttribute("d", `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`);
+    p.setAttribute("fill","none");
+    p.setAttribute("stroke","#d0d4dc");
+    p.setAttribute("stroke-width","1");
+    return p;
+  };
+
+  edges.slice(0, 220).forEach(([a,b])=>{
+    const A=nodeById[a], B=nodeById[b];
+    if (!A || !B) return;
+    svg.appendChild(line(A.x,A.y,B.x,B.y));
+  });
+
+  // nodes on top
+  nodes.forEach(n=>{
+    const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+    const c = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx", n.x);
+    c.setAttribute("cy", n.y);
+    c.setAttribute("r", 14);
+    c.setAttribute("fill", "#ffffff");
+    c.setAttribute("stroke", "#cfd5df");
+    g.appendChild(c);
+
+    const t = document.createElementNS("http://www.w3.org/2000/svg","text");
+    t.setAttribute("x", n.x);
+    t.setAttribute("y", n.y+4);
+    t.setAttribute("text-anchor","middle");
+    t.setAttribute("font-size","11");
+    t.setAttribute("fill","#2c2f36");
+    t.textContent = n.label;
+    g.appendChild(t);
+    svg.appendChild(g);
+  });
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/state", { cache:"no-store" });
+    if (!r.ok) throw new Error("bad response");
+    const s = await r.json();
+    setStatus(true);
+
+    document.getElementById("uptime").textContent = uptimeStr(s.uptimeSeconds || 0);
+    document.getElementById("tick").textContent = String(s.tickCount ?? "—");
+    document.getElementById("tickrate").textContent = (s.tickMs ? (s.tickMs/1000).toFixed(1)+"s" : "—");
+
+    const add = s.addresses || {};
+    document.getElementById("contracts").textContent =
+      add.pullSafe ? `PullSafe ${short(add.pullSafe)} | Registry ${short(add.registry)}` : "contracts: —";
+
+    // shock panel
+    if (s.recentEvents) {
+      const shockFail = s.recentEvents.find(ev => ev.type === "EdgeFailed" && (ev.reason === "LIMIT" || ev.reason));
+      if (shockFail) document.getElementById("shock").innerHTML = `over-cap attempt → <span class="ok">contained ✅</span>`;
+    }
+
+    renderBalances(s);
+    renderEvents(s);
+    renderGraph(s);
+
+  } catch (e) {
+    setStatus(false);
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

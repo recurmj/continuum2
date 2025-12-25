@@ -5,41 +5,29 @@ import {AgentWallet} from "./AgentWallet.sol";
 
 /// @title ContinuumWorld
 /// @notice Public crank for Continuum: advances ticks and asks agents to execute due pulls.
-/// @dev This contract is intentionally dumb and non-discretionary.
-///      It cannot move funds itself; only AgentWallets (as grantees) can call the executor.
-///
-/// FIXES:
-/// 1) Make tick() safely permissionless by rate-limiting (one tick per block OR minimum seconds).
-/// 2) Add a non-reverting tick path (tickSafe) so a single failing agent doesn't brick the world.
-/// 3) Keep strict tick() available (reverts if any agent reverts) for testing/debug.
-/// 4) Make addAgent idempotent + validate contract code.
+/// @dev Safe-crank: a single agent failure MUST NOT revert the world tick.
+///      This contract cannot move funds; only AgentWallets execute pulls.
 contract ContinuumWorld {
     uint32 public tickCount;
     uint256 public startedAt;
 
+    // Optional: throttle public ticking (set to 0 to disable)
+    uint256 public minTickIntervalSeconds;
+    uint256 public lastTickAt;
+
     AgentWallet[] public agents;
-
-    // --- Anti-spam / anti-acceleration guards ---
-    // If both are set, BOTH must be satisfied.
-    uint64 public minTickSeconds; // 0 = disabled
-    uint256 public lastTickTimestamp;
-    uint256 public lastTickBlock;
-
-    // Optional: prevent duplicate agents
     mapping(address => bool) public isAgent;
 
     event Started(uint256 timestamp);
     event AgentAdded(address indexed agent);
+    event AgentRemoved(address indexed agent);
     event WorldTick(uint32 indexed tick, uint256 timestamp);
 
-    // Emitted only by tickSafe()
-    event AgentTickFailed(uint32 indexed tick, address indexed agent, bytes data);
+    // Emitted when an agent reverts during a safe tick
+    event AgentTickFailed(uint32 indexed tick, address indexed agent, bytes revertData);
 
-    constructor(uint64 _minTickSeconds) {
+    constructor() {
         startedAt = block.timestamp;
-        lastTickTimestamp = block.timestamp;
-        lastTickBlock = block.number;
-        minTickSeconds = _minTickSeconds; // e.g. 1..10; set 0 to disable
         emit Started(block.timestamp);
     }
 
@@ -47,40 +35,41 @@ contract ContinuumWorld {
         return agents.length;
     }
 
-    /// @notice Update the minimum time between ticks (seconds). Permissionless for v0 demo simplicity.
-    /// @dev If you want to harden: gate this to an owner/keeper later.
-    function setMinTickSeconds(uint64 secs_) external {
-        minTickSeconds = secs_;
+    /// @notice Set a minimum time between ticks. Set to 0 to disable throttling.
+    /// @dev Permissionless for v0. If you want, gate this later (owner/controller).
+    function setMinTickInterval(uint256 seconds_) external {
+        minTickIntervalSeconds = seconds_;
     }
 
     function addAgent(address agent) external {
         require(agent != address(0), "BAD_AGENT");
-        require(agent.code.length > 0, "NOT_CONTRACT");
         require(!isAgent[agent], "DUP_AGENT");
         isAgent[agent] = true;
         agents.push(AgentWallet(agent));
         emit AgentAdded(agent);
     }
 
-    // --- Internal guard used by both tick methods ---
-    function _enforceTickGuards() internal {
-        // Prevent multiple ticks in the same block (stops mass-spam from racing your runner)
-        require(block.number > lastTickBlock, "TOO_SOON_BLOCK");
+    /// @notice Optional remove (swap-and-pop). Permissionless for v0.
+    function removeAgent(address agent) external {
+        require(isAgent[agent], "NOT_AGENT");
+        isAgent[agent] = false;
 
-        // Optional: enforce a minimum wall-clock interval between ticks (helps on fast blocks)
-        if (minTickSeconds != 0) {
-            require(block.timestamp >= lastTickTimestamp + minTickSeconds, "TOO_SOON_TIME");
+        uint256 len = agents.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (address(agents[i]) == agent) {
+                agents[i] = agents[len - 1];
+                agents.pop();
+                emit AgentRemoved(agent);
+                return;
+            }
         }
 
-        lastTickBlock = block.number;
-        lastTickTimestamp = block.timestamp;
+        // Should be unreachable if isAgent is consistent, but keep sane:
+        revert("NOT_FOUND");
     }
 
-    /// @notice Advance the world by 1 tick and invoke each agent's tick(currentTick).
-    /// @dev STRICT: reverts if any agent reverts. Good for tests.
+    /// @notice Unsafe tick (kept for compatibility). Any agent revert will revert the whole tick.
     function tick() external {
-        _enforceTickGuards();
-
         tickCount += 1;
         uint32 t = tickCount;
 
@@ -92,23 +81,41 @@ contract ContinuumWorld {
         emit WorldTick(t, block.timestamp);
     }
 
-    /// @notice Advance the world by 1 tick; continues even if some agents revert.
-    /// @dev SAFE: logs failures and keeps the simulation alive on public RPCs.
+    /// @notice Safe tick: advances time and invokes agents; never reverts due to agent failures.
     function tickSafe() external {
-        _enforceTickGuards();
+        _throttle();
 
         tickCount += 1;
         uint32 t = tickCount;
 
         uint256 len = agents.length;
         for (uint256 i = 0; i < len; i++) {
+            address a = address(agents[i]);
+            if (!isAgent[a]) continue;
+
             try agents[i].tick(t) {
                 // ok
             } catch (bytes memory data) {
-                emit AgentTickFailed(t, address(agents[i]), data);
+                emit AgentTickFailed(t, a, data);
             }
         }
 
         emit WorldTick(t, block.timestamp);
+    }
+
+    /// @notice Batch safe ticks to reduce RPC/mempool churn (e.g. tickRange(5))
+    function tickRange(uint32 n) external {
+        require(n > 0 && n <= 50, "BAD_N");
+        for (uint32 i = 0; i < n; i++) {
+            tickSafe();
+        }
+    }
+
+    function _throttle() internal {
+        uint256 minI = minTickIntervalSeconds;
+        if (minI != 0) {
+            require(block.timestamp >= lastTickAt + minI, "TOO_FAST");
+        }
+        lastTickAt = block.timestamp;
     }
 }

@@ -6,14 +6,20 @@ import { startApiServer, updateState } from "./api.js";
 /**
  * Continuum Runner (EVM-real)
  *
- * Key fixes in this version:
- * 1) Use world.tickSafe() (and preflight tickSafe.staticCall()) so a single agent revert
- *    does NOT revert the whole world tick. Falls back to tick() if tickSafe doesn't exist.
+ * Fixes:
+ * 1) ContinuumWorld constructor support:
+ *    - New World contract takes constructor(uint64 _minTickSeconds).
+ *    - We auto-detect constructor inputs from artifact ABI and pass WORLD_MIN_TICK_SECONDS if required.
  *
- * 2) Keep nonce strategy you already implemented (resync from "pending" and never go backwards).
+ * 2) tickSafe detection:
+ *    - Do NOT "probe" tickSafe by calling it (it can revert for reasons unrelated to existence).
+ *    - Detect by ABI presence: world.interface.getFunction("tickSafe") in try/catch.
  *
- * 3) Make port-collision failures obvious: handle EADDRINUSE at process level so you never
- *    "silently" think you're running while another instance owns the port.
+ * 3) Use tickSafe() when available (best-effort world tick), else tick().
+ *
+ * 4) Keep robust nonce strategy (resync from pending, never go backwards).
+ *
+ * 5) Make port collisions fatal and obvious.
  */
 
 // ----------------------------- Config ----------------------------------------
@@ -28,6 +34,9 @@ const STATE_FILE = process.env.STATE_FILE ?? "./state.json";
 const RESUME = (process.env.RESUME ?? "1") !== "0";
 
 const DEPLOYER_INDEX = Number(process.env.DEPLOYER_INDEX ?? "0");
+
+// IMPORTANT: your ContinuumWorld now has constructor(uint64 _minTickSeconds)
+const WORLD_MIN_TICK_SECONDS = BigInt(process.env.WORLD_MIN_TICK_SECONDS ?? "0");
 
 const WORKERS = Number(process.env.WORKERS ?? "10");
 const MERCHANTS = Number(process.env.MERCHANTS ?? "3");
@@ -180,6 +189,27 @@ function isMempoolFeeish(msg) {
   );
 }
 
+// Helper: detect ContinuumWorld constructor args from ABI and deploy accordingly
+async function deployWorld(ContinuumWorldArtifact, deployer) {
+  const f = new ethers.ContractFactory(
+    ContinuumWorldArtifact.abi,
+    ContinuumWorldArtifact.bytecode,
+    deployer
+  );
+
+  const inputs = (ContinuumWorldArtifact.abi || []).find((x) => x.type === "constructor")?.inputs ?? [];
+  if (inputs.length === 0) {
+    return f.deploy();
+  }
+  if (inputs.length === 1 && String(inputs[0].type) === "uint64") {
+    console.log("ContinuumWorld constructor(uint64) using WORLD_MIN_TICK_SECONDS:", WORLD_MIN_TICK_SECONDS.toString());
+    return f.deploy(WORLD_MIN_TICK_SECONDS);
+  }
+  throw new Error(
+    `Unsupported ContinuumWorld constructor signature. Inputs: ${inputs.map((i) => i.type).join(",")}`
+  );
+}
+
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);
   const network = await provider.getNetwork();
@@ -253,11 +283,7 @@ async function main() {
     ).deploy(await registry.getAddress());
     await pullSafe.waitForDeployment();
 
-    world = await new ethers.ContractFactory(
-      ContinuumWorld.abi,
-      ContinuumWorld.bytecode,
-      deployer
-    ).deploy();
+    world = await deployWorld(ContinuumWorld, deployer);
     await world.waitForDeployment();
 
     await (await registry.setTrustedExecutor(await pullSafe.getAddress(), true)).wait();
@@ -537,16 +563,15 @@ async function main() {
   const worldConn = new ethers.Contract(addresses.world, ContinuumWorld.abi, deployer);
   const tokenConn = new ethers.Contract(addresses.token, MockUSD.abi, provider);
 
-  // --- NEW: detect tickSafe availability and choose method once ---
+  // Detect tickSafe by ABI presence (NOT by calling it)
   let HAS_TICKSAFE = false;
   try {
-    // if function missing, this will revert (often with no data)
-    await worldConn.tickSafe.staticCall();
+    worldConn.interface.getFunction("tickSafe");
     HAS_TICKSAFE = true;
   } catch {
     HAS_TICKSAFE = false;
   }
-  console.log("World tick mode:", HAS_TICKSAFE ? "tickSafe()" : "tick() (fallback)");
+  console.log("World tick mode:", HAS_TICKSAFE ? "tickSafe()" : "tick()");
 
   async function worldTickStatic() {
     if (HAS_TICKSAFE) return worldConn.tickSafe.staticCall();

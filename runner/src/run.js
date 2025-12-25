@@ -6,21 +6,14 @@ import { startApiServer, updateState } from "./api.js";
 /**
  * Continuum Runner (EVM-real)
  *
- * FIX (makes nonce spam stop on public RPCs):
- * - DO NOT use ethers NonceManager.
- * - DO NOT “walk” the nonce forward blindly on errors.
- * - Instead:
- *   1) Keep a local mutex (already) so only 1 tick runs at a time.
- *   2) Maintain a localNextNonce counter.
- *   3) Before every send, resync localNextNonce to provider.getTransactionCount(addr, "pending").
- *      - If RPC lies and returns latest, that's still fine: we never go *backwards*.
- *   4) If we get "nonce already used/too low", resync from pending again and retry with that nonce.
- *   5) Only increment localNextNonce AFTER the send is accepted (tx object returned).
+ * Key fixes in this version:
+ * 1) Use world.tickSafe() (and preflight tickSafe.staticCall()) so a single agent revert
+ *    does NOT revert the whole world tick. Falls back to tick() if tickSafe doesn't exist.
  *
- * Also fixed:
- * - Guard API port collisions by handling server error and exiting cleanly (so you notice immediately).
- * - Added DEPLOYER_INDEX escape hatch.
- * - Better fee bump retry on mempool errors, but without nonce chaos.
+ * 2) Keep nonce strategy you already implemented (resync from "pending" and never go backwards).
+ *
+ * 3) Make port-collision failures obvious: handle EADDRINUSE at process level so you never
+ *    "silently" think you're running while another instance owns the port.
  */
 
 // ----------------------------- Config ----------------------------------------
@@ -34,24 +27,45 @@ const API_PORT = Number(process.env.PORT ?? "8787");
 const STATE_FILE = process.env.STATE_FILE ?? "./state.json";
 const RESUME = (process.env.RESUME ?? "1") !== "0";
 
-// NEW: allow changing which account is deployer (escape hatch)
 const DEPLOYER_INDEX = Number(process.env.DEPLOYER_INDEX ?? "0");
 
-// Defaults (frozen unless you override env vars)
 const WORKERS = Number(process.env.WORKERS ?? "10");
 const MERCHANTS = Number(process.env.MERCHANTS ?? "3");
 const SUBS = Number(process.env.SUBS ?? "2");
 
-// Optional: raise gas limit for heavy ticks on public RPCs
 const TICK_GAS_LIMIT = process.env.TICK_GAS_LIMIT ? BigInt(process.env.TICK_GAS_LIMIT) : null;
-// Optional: allow skipping revert-ticks instead of spamming chain
 const SKIP_ON_PREFLIGHT_REVERT = (process.env.SKIP_ON_PREFLIGHT_REVERT ?? "1") !== "0";
 
-// How many times to retry sending the tick tx in one interval
 const TICK_SEND_RETRIES = Number(process.env.TICK_SEND_RETRIES ?? "6");
-
-// Small delay between retry attempts (ms)
 const RETRY_SLEEP_MS = Number(process.env.RETRY_SLEEP_MS ?? "800");
+
+// -------------------------- Process guards -----------------------------------
+function isAddrInUseError(e) {
+  const msg = String(e?.message ?? e ?? "");
+  return (
+    e?.code === "EADDRINUSE" ||
+    msg.includes("EADDRINUSE") ||
+    msg.includes("address already in use")
+  );
+}
+
+process.on("uncaughtException", (e) => {
+  if (isAddrInUseError(e)) {
+    console.error("\n[FATAL] API port already in use. Pick a different PORT or kill the other runner.");
+    console.error(String(e?.message ?? e));
+    process.exit(1);
+  }
+  throw e;
+});
+
+process.on("unhandledRejection", (e) => {
+  if (isAddrInUseError(e)) {
+    console.error("\n[FATAL] API port already in use. Pick a different PORT or kill the other runner.");
+    console.error(String(e?.message ?? e));
+    process.exit(1);
+  }
+  // let Node print stack
+});
 
 // -------------------------- Foundry artifacts --------------------------------
 function loadArtifact(solName, contractName = solName) {
@@ -171,7 +185,6 @@ async function main() {
   const network = await provider.getNetwork();
   const chainId = Number(network.chainId);
 
-  // Deployer/controller signer
   const deployer = walletAt(DEPLOYER_INDEX, provider);
   const deployerAddr = await deployer.getAddress();
 
@@ -180,7 +193,6 @@ async function main() {
   console.log("DEPLOYER_INDEX:", DEPLOYER_INDEX);
   console.log("DEPLOYER (fund this):", deployerAddr);
 
-  // Owner EOAs for agent wallets (unchanged indices, only deployer index is variable)
   const ownerTreasury = walletAt(1, provider);
   const ownerEmployer = walletAt(2, provider);
 
@@ -190,16 +202,12 @@ async function main() {
     walletAt(3 + MERCHANTS + SUBS + i, provider)
   );
 
-  // Load artifacts
   const MockUSD = loadArtifact("MockUSD");
   const RecurConsentRegistry = loadArtifact("RecurConsentRegistry");
   const RecurPullSafeV2 = loadArtifact("RecurPullSafeV2");
   const AgentWallet = loadArtifact("AgentWallet");
   const ContinuumWorld = loadArtifact("ContinuumWorld");
 
-  // -------------------------------------------------------------------------
-  // Deploy OR resume existing deployment
-  // -------------------------------------------------------------------------
   const prior = RESUME ? readJsonIfExists(STATE_FILE) : null;
 
   const canResume = async () => {
@@ -508,13 +516,7 @@ async function main() {
     World: ContinuumWorld.abi,
   };
 
-  // Ensure API bind errors are visible and fatal (helps avoid hidden double-runs)
-  try {
-    startApiServer({ port: API_PORT, addresses, abis });
-  } catch (e) {
-    console.error("API failed to start:", e);
-    process.exit(1);
-  }
+  startApiServer({ port: API_PORT, addresses, abis });
 
   const deploymentState = {
     version: 1,
@@ -532,11 +534,30 @@ async function main() {
   console.log(`- Tick:      every ${TICK_MS} ms`);
   console.log("");
 
-  // worldConn uses raw deployer signer; we pass explicit nonce overrides
   const worldConn = new ethers.Contract(addresses.world, ContinuumWorld.abi, deployer);
   const tokenConn = new ethers.Contract(addresses.token, MockUSD.abi, provider);
 
-  // Log polling
+  // --- NEW: detect tickSafe availability and choose method once ---
+  let HAS_TICKSAFE = false;
+  try {
+    // if function missing, this will revert (often with no data)
+    await worldConn.tickSafe.staticCall();
+    HAS_TICKSAFE = true;
+  } catch {
+    HAS_TICKSAFE = false;
+  }
+  console.log("World tick mode:", HAS_TICKSAFE ? "tickSafe()" : "tick() (fallback)");
+
+  async function worldTickStatic() {
+    if (HAS_TICKSAFE) return worldConn.tickSafe.staticCall();
+    return worldConn.tick.staticCall();
+  }
+
+  async function worldTickSend(overrides) {
+    if (HAS_TICKSAFE) return worldConn.tickSafe(overrides);
+    return worldConn.tick(overrides);
+  }
+
   let lastBlock =
     doResume && prior?.lastBlock != null ? Number(prior.lastBlock) : await provider.getBlockNumber();
 
@@ -632,7 +653,6 @@ async function main() {
   persistRuntime();
 
   // -------------------------- Nonce strategy (robust) -------------------------
-  // Start from pending (best) but never go backwards if RPC lies.
   let localNextNonce = await provider.getTransactionCount(deployerAddr, "pending");
   if (!Number.isFinite(Number(localNextNonce))) {
     localNextNonce = await provider.getTransactionCount(deployerAddr, "latest");
@@ -649,8 +669,7 @@ async function main() {
     const o = {};
     if (TICK_GAS_LIMIT != null) o.gasLimit = TICK_GAS_LIMIT;
 
-    // bump +12.5% each attempt
-    const mul = 1000n + BigInt(bump) * 125n;
+    const mul = 1000n + BigInt(bump) * 125n; // +12.5% per attempt
 
     if (fee?.maxFeePerGas != null && fee?.maxPriorityFeePerGas != null) {
       o.maxFeePerGas = (fee.maxFeePerGas * mul) / 1000n;
@@ -663,7 +682,7 @@ async function main() {
 
   async function preflightTick() {
     try {
-      await worldConn.tick.staticCall();
+      await worldTickStatic();
       return { ok: true };
     } catch (e) {
       const { reason, data, msg } = extractEthersRevert(e);
@@ -672,11 +691,9 @@ async function main() {
   }
 
   async function sendTickOnce() {
-    // Always resync before attempting a send. This is the key difference vs your current file.
     await resyncNonceFromPending();
 
     for (let attempt = 0; attempt < TICK_SEND_RETRIES; attempt++) {
-      // Re-sync again on each attempt because RPC/mempool may accept something async
       await resyncNonceFromPending();
 
       const feeOverrides = await buildFeeOverrides(attempt);
@@ -684,8 +701,7 @@ async function main() {
       const overrides = { ...feeOverrides, nonce };
 
       try {
-        const tx = await worldConn.tick(overrides);
-        // Only advance nonce after tx object returns (accepted by provider)
+        const tx = await worldTickSend(overrides);
         localNextNonce = nonce + 1;
         return tx;
       } catch (e) {
@@ -694,7 +710,6 @@ async function main() {
 
         if (isNonceUsedish(m)) {
           console.error(`tick nonce warning (nonce=${nonce}) -> resync+retry:`, m);
-          // Do NOT blindly increment; resync from pending is the correct fix.
           await resyncNonceFromPending();
           await sleep(RETRY_SLEEP_MS);
           continue;
@@ -723,7 +738,6 @@ async function main() {
 
     ticking = true;
     try {
-      // Preflight (no nonce consumed)
       const pf = await preflightTick();
       if (!pf.ok) {
         errorCount += 1;
@@ -744,7 +758,6 @@ async function main() {
 
       const tickCount = await worldConn.tickCount();
 
-      // Pull logs since lastBlock
       const currentBlock = rcpt.blockNumber;
       const fromBlock = lastBlock + 1;
       const toBlock = currentBlock;

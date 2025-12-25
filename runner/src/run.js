@@ -37,8 +37,16 @@ function loadArtifact(solName, contractName = solName) {
   return { abi: j.abi, bytecode };
 }
 
+/**
+ * IMPORTANT FIX:
+ * - Force deterministic derivation path for ALL wallets.
+ * - This prevents the deployer/signer from "changing" across runs/sessions.
+ * - Always uses m/44'/60'/0'/0/<index>
+ */
 function walletAt(index, provider) {
-  return ethers.HDNodeWallet.fromPhrase(MNEMONIC, undefined, `m/44'/60'/0'/0/${index}`).connect(provider);
+  return ethers.HDNodeWallet
+    .fromPhrase(MNEMONIC, undefined, `m/44'/60'/0'/0/${index}`)
+    .connect(provider);
 }
 
 function randBytes32() {
@@ -88,15 +96,6 @@ function writeJsonAtomic(p, obj) {
   fs.renameSync(tmp, p);
 }
 
-async function hasCode(provider, addr) {
-  try {
-    const code = await provider.getCode(addr);
-    return code && code !== "0x";
-  } catch {
-    return false;
-  }
-}
-
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);
 
@@ -105,6 +104,11 @@ async function main() {
 
   // Deployer/controller (also registry controller)
   const deployer = walletAt(0, provider);
+
+  // Print deterministically so you ALWAYS know what address must be funded.
+  console.log("RPC:", RPC);
+  console.log("chainId:", chainId);
+  console.log("DEPLOYER (fund this):", await deployer.getAddress());
 
   // Owner EOAs for agent wallets:
   // [1] treasury, [2] employer, then merchants, subs, workers.
@@ -160,7 +164,7 @@ async function main() {
       RecurConsentRegistry.abi,
       RecurConsentRegistry.bytecode,
       deployer
-    ).deploy(deployer.address);
+    ).deploy(await deployer.getAddress());
     await registry.waitForDeployment();
 
     pullSafe = await new ethers.ContractFactory(
@@ -184,7 +188,7 @@ async function main() {
   // Deploy OR attach agent wallets
   async function deployAgent(label, ownerWallet) {
     const agent = await new ethers.ContractFactory(AgentWallet.abi, AgentWallet.bytecode, deployer).deploy(
-      ownerWallet.address,
+      await ownerWallet.getAddress(),
       await pullSafe.getAddress()
     );
     await agent.waitForDeployment();
@@ -202,18 +206,18 @@ async function main() {
     const a = prior.addresses.agents;
     treasury = attachAgent("treasury", ownerTreasury, a.treasury);
     employer = attachAgent("employer", ownerEmployer, a.employer);
-    merchants = a.merchants.map((addr, i) => attachAgent(`merchant${i+1}`, ownerMerchants[i], addr));
-    subs = a.subs.map((addr, i) => attachAgent(`sub${i+1}`, ownerSubs[i], addr));
-    workers = a.workers.map((addr, i) => attachAgent(`worker${i+1}`, ownerWorkers[i], addr));
+    merchants = a.merchants.map((addr, i) => attachAgent(`merchant${i + 1}`, ownerMerchants[i], addr));
+    subs = a.subs.map((addr, i) => attachAgent(`sub${i + 1}`, ownerSubs[i], addr));
+    workers = a.workers.map((addr, i) => attachAgent(`worker${i + 1}`, ownerWorkers[i], addr));
   } else {
     treasury = await deployAgent("treasury", ownerTreasury);
     employer = await deployAgent("employer", ownerEmployer);
     merchants = [];
-    for (let i = 0; i < MERCHANTS; i++) merchants.push(await deployAgent(`merchant${i+1}`, ownerMerchants[i]));
+    for (let i = 0; i < MERCHANTS; i++) merchants.push(await deployAgent(`merchant${i + 1}`, ownerMerchants[i]));
     subs = [];
-    for (let i = 0; i < SUBS; i++) subs.push(await deployAgent(`sub${i+1}`, ownerSubs[i]));
+    for (let i = 0; i < SUBS; i++) subs.push(await deployAgent(`sub${i + 1}`, ownerSubs[i]));
     workers = [];
-    for (let i = 0; i < WORKERS; i++) workers.push(await deployAgent(`worker${i+1}`, ownerWorkers[i]));
+    for (let i = 0; i < WORKERS; i++) workers.push(await deployAgent(`worker${i + 1}`, ownerWorkers[i]));
 
     // One-time seeding (pushes)
     const ONE = 10n ** 18n;
@@ -248,7 +252,7 @@ async function main() {
   function structHashFor(authFields) {
     return keccak(
       abiEncode(
-        ["bytes32","address","address","address","uint256","uint256","uint256","bytes32"],
+        ["bytes32", "address", "address", "address", "uint256", "uint256", "uint256", "bytes32"],
         [
           AUTH_TYPEHASH,
           authFields.grantor,
@@ -329,7 +333,6 @@ async function main() {
 
     // Spending: each merchant pulls from each worker every tick (smaller)
     const spend = 120n * ONE;
-    // Split spend across merchants so each worker spends total ~spend*MERCHANTS per tick.
     for (const m of merchants) {
       for (const w of workers) {
         const nonce = randBytes32();
@@ -377,7 +380,7 @@ async function main() {
     }
 
     // Merchant remit: treasury pulls from each merchant every tick
-    const remit = BigInt(WORKERS) * spend; // roughly match inflows
+    const remit = BigInt(WORKERS) * spend;
     for (const m of merchants) {
       const nonce = randBytes32();
       const { fields, sig } = await signPPO({
@@ -399,7 +402,6 @@ async function main() {
     }
 
     // Treasury drip: employer pulls from treasury every tick
-    // Match expected payroll outflow (WORKERS*salary)
     const drip = BigInt(WORKERS) * salary;
     {
       const nonce = randBytes32();
@@ -421,9 +423,7 @@ async function main() {
       });
     }
 
-    // Shock: pick the very first merchant edge (edgeId=0) and try over-cap at tick 5
-    // AgentWallet edges are appended in order; for each merchant we added WORKERS edges first.
-    // So edgeId=0 exists for merchants[0].
+    // Shock: first merchant edge (edgeId=0) over-cap at tick 5
     await (await merchants[0].contract.connect(merchants[0].owner).setShock(0, 5, spend + 1n)).wait();
   }
 
@@ -442,7 +442,6 @@ async function main() {
     },
   };
 
-  // Provide ABIs for log decoding
   const abis = {
     PullSafe: RecurPullSafeV2.abi,
     Registry: RecurConsentRegistry.abi,
@@ -452,7 +451,6 @@ async function main() {
 
   startApiServer({ port: API_PORT, addresses, abis });
 
-  // Persist deployment so the runner can resume after restarts
   const deploymentState = {
     version: 1,
     chainId,
@@ -492,7 +490,6 @@ async function main() {
   ];
 
   function normalizeEvent(ev) {
-    // ev: {name,args, address, blockNumber, transactionHash, ...}
     const base = {
       address: ev.address,
       blockNumber: ev.blockNumber,
@@ -534,7 +531,6 @@ async function main() {
   }
 
   async function snapshot(tickCount) {
-    // balances (keep as strings)
     const bal = async (addr) => (await tokenConn.balanceOf(addr)).toString();
 
     const state = {
@@ -568,10 +564,8 @@ async function main() {
     }
   }
 
-  // Persist once per minute (and also opportunistically on ticks)
   setInterval(persistRuntime, 60_000).unref?.();
 
-  // Best-effort persistence on shutdown
   const onShutdown = () => {
     try { persistRuntime(); } catch {}
     process.exit(0);
@@ -579,12 +573,10 @@ async function main() {
   process.on("SIGINT", onShutdown);
   process.on("SIGTERM", onShutdown);
 
-  // Prime initial state
   await snapshot(await worldConn.tickCount());
   updateState({ lastTickAt: Date.now(), errorCount });
   persistRuntime();
 
-  // Main loop
   setInterval(async () => {
     try {
       const tx = await worldConn.tick();
@@ -594,7 +586,6 @@ async function main() {
 
       const tickCount = await worldConn.tickCount();
 
-      // Pull new logs since lastBlock
       const currentBlock = rcpt.blockNumber;
       const fromBlock = lastBlock + 1;
       const toBlock = currentBlock;
@@ -607,7 +598,6 @@ async function main() {
 
         const recent = [];
         for (const l of logs) {
-          // Decode by address
           try {
             if (l.address.toLowerCase() === addresses.pullSafe.toLowerCase()) {
               const ev = ifacePullSafe.parseLog(l);
@@ -631,14 +621,12 @@ async function main() {
 
       persistRuntime();
 
-      // Snapshot balances every 3 ticks (keeps /state light but fresh)
       if (Number(tickCount) % 3 === 0) {
         await snapshot(tickCount);
       } else {
         updateState({ tickCount: Number(tickCount) });
       }
 
-      // console print every 10 ticks
       if (Number(tickCount) % 10 === 0) {
         const bEmp = await tokenConn.balanceOf(employer.addr);
         const bTre = await tokenConn.balanceOf(treasury.addr);

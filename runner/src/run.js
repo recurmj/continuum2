@@ -12,11 +12,12 @@ import { startApiServer, updateState } from "./api.js";
  * - Exposes /state + dashboard via a tiny HTTP server (api.js)
  *
  * FIXES INCLUDED (critical):
- * 1) Prevent overlapping tick() txs (mutex) -> avoids nonce spam, replacement-underpriced, NONCE_EXPIRED
- * 2) Preflight tick via staticCall to capture revert reason BEFORE sending a tx
- * 3) Explicit nonce manager + pending nonce awareness
- * 4) Backoff on errors + treat "replacement underpriced" as non-fatal (skip)
- * 5) Persist lastBlock/errorCount periodically + on shutdown
+ * 1) Deterministic derivation paths for all wallets
+ * 2) NonceManager used as the ONLY deployer signer (including deployments + tick loop)
+ * 3) Tick mutex to prevent overlapping txs
+ * 4) Preflight tick via staticCall to capture revert reason BEFORE sending a tx
+ * 5) Gentle backoff on mempool/nonces; do not spiral into nonce chaos
+ * 6) Persist lastBlock/errorCount periodically + on shutdown
  */
 
 // ----------------------------- Config ----------------------------------------
@@ -50,9 +51,8 @@ function loadArtifact(solName, contractName = solName) {
 }
 
 /**
- * IMPORTANT FIX:
+ * IMPORTANT:
  * - Force deterministic derivation path for ALL wallets.
- * - This prevents the deployer/signer from "changing" across runs/sessions.
  * - Always uses m/44'/60'/0'/0/<index>
  */
 function walletAt(index, provider) {
@@ -97,8 +97,6 @@ function decodeRevertReason(dataHex) {
 function extractEthersRevert(e) {
   const out = { reason: "", data: "" };
   try {
-    // Common shapes:
-    // e.data, e.error?.data, e.info?.error?.data, e.receipt?.revertReason (rare)
     const data =
       e?.data ??
       e?.error?.data ??
@@ -107,11 +105,9 @@ function extractEthersRevert(e) {
       "";
     if (typeof data === "string") out.data = data;
 
-    // Many providers put "reason" on shortMessage or error.message
     const msg = String(e?.shortMessage ?? e?.reason ?? e?.message ?? "");
     out.reason = msg;
 
-    // If we have Error(string) payload, decode it (often much clearer than msg)
     const decoded = decodeRevertReason(out.data);
     if (decoded) out.reason = decoded;
 
@@ -136,22 +132,33 @@ function writeJsonAtomic(p, obj) {
   fs.renameSync(tmp, p);
 }
 
-function sleep(ms) {
+async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(RPC);
-
   const network = await provider.getNetwork();
   const chainId = Number(network.chainId);
 
-  // Deployer/controller (also registry controller)
-  const deployer = walletAt(0, provider);
+  // -------------------------------------------------------------------------
+  // Deployer/controller
+  // IMPORTANT: use NonceManager from the beginning so deployments + tick share one coherent nonce source.
+  // -------------------------------------------------------------------------
+  const deployerEOA = walletAt(0, provider);
+  const deployer = new ethers.NonceManager(deployerEOA);
 
   console.log("RPC:", RPC);
   console.log("chainId:", chainId);
-  console.log("DEPLOYER (fund this):", await deployer.getAddress());
+  console.log("DEPLOYER (fund this):", await deployerEOA.getAddress());
+
+  // Align local nonce view to pending to avoid "nonce already used" after restarts
+  try {
+    const pendingNonce = await provider.getTransactionCount(await deployerEOA.getAddress(), "pending");
+    deployer.setNonce(pendingNonce);
+  } catch {
+    // ignore
+  }
 
   // Owner EOAs for agent wallets:
   // [1] treasury, [2] employer, then merchants, subs, workers.
@@ -160,7 +167,10 @@ async function main() {
 
   const ownerMerchants = Array.from({ length: MERCHANTS }, (_, i) => walletAt(3 + i, provider));
   const ownerSubs = Array.from({ length: SUBS }, (_, i) => walletAt(3 + MERCHANTS + i, provider));
-  const ownerWorkers = Array.from({ length: WORKERS }, (_, i) => walletAt(3 + MERCHANTS + SUBS + i, provider));
+  const ownerWorkers = Array.from(
+    { length: WORKERS },
+    (_, i) => walletAt(3 + MERCHANTS + SUBS + i, provider)
+  );
 
   // Load artifacts
   const MockUSD = loadArtifact("MockUSD");
@@ -207,7 +217,7 @@ async function main() {
       RecurConsentRegistry.abi,
       RecurConsentRegistry.bytecode,
       deployer
-    ).deploy(await deployer.getAddress());
+    ).deploy(await deployerEOA.getAddress());
     await registry.waitForDeployment();
 
     pullSafe = await new ethers.ContractFactory(
@@ -510,15 +520,13 @@ async function main() {
   console.log(`- Tick:      every ${TICK_MS} ms`);
   console.log("");
 
-  // IMPORTANT: use NonceManager to avoid stale local nonce assumptions
-  const managedDeployer = new ethers.NonceManager(deployer);
-  const worldConn = new ethers.Contract(addresses.world, ContinuumWorld.abi, managedDeployer);
+  // IMPORTANT: worldConn must use the SAME NonceManager deployer
+  const worldConn = new ethers.Contract(addresses.world, ContinuumWorld.abi, deployer);
   const tokenConn = new ethers.Contract(addresses.token, MockUSD.abi, provider);
 
   // Log polling
-  let lastBlock = (doResume && prior?.lastBlock != null)
-    ? Number(prior.lastBlock)
-    : await provider.getBlockNumber();
+  let lastBlock =
+    doResume && prior?.lastBlock != null ? Number(prior.lastBlock) : await provider.getBlockNumber();
 
   const ifacePullSafe = new ethers.Interface(RecurPullSafeV2.abi);
   const ifaceRegistry = new ethers.Interface(RecurConsentRegistry.abi);
@@ -571,7 +579,13 @@ async function main() {
       return { ...base, edgeId: Number(a[0]), authHash: a[1], amount: a[2].toString() };
     }
     if (ev.name === "EdgeFailed") {
-      return { ...base, edgeId: Number(a[0]), authHash: a[1], amount: a[2].toString(), reason: decodeRevertReason(a[3]) };
+      return {
+        ...base,
+        edgeId: Number(a[0]),
+        authHash: a[1],
+        amount: a[2].toString(),
+        reason: decodeRevertReason(a[3]),
+      };
     }
     return { ...base, args: a.map((x) => (typeof x === "bigint" ? x.toString() : x)) };
   }
@@ -586,8 +600,12 @@ async function main() {
       agents: {
         treasury: { address: treasury.addr, balance: await bal(treasury.addr) },
         employer: { address: employer.addr, balance: await bal(employer.addr) },
-        workers: await Promise.all(workers.map(async (w) => ({ address: w.addr, balance: await bal(w.addr) }))),
-        merchants: await Promise.all(merchants.map(async (m) => ({ address: m.addr, balance: await bal(m.addr) }))),
+        workers: await Promise.all(
+          workers.map(async (w) => ({ address: w.addr, balance: await bal(w.addr) }))
+        ),
+        merchants: await Promise.all(
+          merchants.map(async (m) => ({ address: m.addr, balance: await bal(m.addr) }))
+        ),
         subs: await Promise.all(subs.map(async (s) => ({ address: s.addr, balance: await bal(s.addr) }))),
       },
       shock: { tick: 5, contained: null, armed: true },
@@ -613,7 +631,9 @@ async function main() {
   setInterval(persistRuntime, 60_000).unref?.();
 
   const onShutdown = () => {
-    try { persistRuntime(); } catch {}
+    try {
+      persistRuntime();
+    } catch {}
     process.exit(0);
   };
   process.on("SIGINT", onShutdown);
@@ -633,7 +653,15 @@ async function main() {
 
     ticking = true;
     try {
-      // Preflight: if this reverts, you get revert data (and we avoid wasting gas + nonce spam)
+      // Keep NonceManager aligned (cheap and avoids stale local nonce after long RPC hiccups)
+      try {
+        const pendingNonce = await provider.getTransactionCount(await deployerEOA.getAddress(), "pending");
+        deployer.setNonce(pendingNonce);
+      } catch {
+        // ignore
+      }
+
+      // Preflight: avoid wasting a nonce+gas if tick will revert
       try {
         await worldConn.tick.staticCall();
       } catch (e) {
@@ -646,10 +674,8 @@ async function main() {
           console.error("tick preflight reverted:", reason || e);
           return;
         }
-        // If you want to force-send anyway, fall through (not recommended)
       }
 
-      // Send the real tx
       const overrides = {};
       if (TICK_GAS_LIMIT != null) overrides.gasLimit = TICK_GAS_LIMIT;
 
@@ -660,7 +686,6 @@ async function main() {
 
       const tickCount = await worldConn.tickCount();
 
-      // Pull new logs since lastBlock
       const currentBlock = rcpt.blockNumber;
       const fromBlock = lastBlock + 1;
       const toBlock = currentBlock;
@@ -677,18 +702,40 @@ async function main() {
           try {
             if (l.address.toLowerCase() === addresses.pullSafe.toLowerCase()) {
               const ev = ifacePullSafe.parseLog(l);
-              recent.push(normalizeEvent({ ...ev, address: l.address, blockNumber: l.blockNumber, transactionHash: l.transactionHash }));
+              recent.push(
+                normalizeEvent({
+                  ...ev,
+                  address: l.address,
+                  blockNumber: l.blockNumber,
+                  transactionHash: l.transactionHash,
+                })
+              );
             } else if (l.address.toLowerCase() === addresses.registry.toLowerCase()) {
               const ev = ifaceRegistry.parseLog(l);
-              recent.push(normalizeEvent({ ...ev, address: l.address, blockNumber: l.blockNumber, transactionHash: l.transactionHash }));
+              recent.push(
+                normalizeEvent({
+                  ...ev,
+                  address: l.address,
+                  blockNumber: l.blockNumber,
+                  transactionHash: l.transactionHash,
+                })
+              );
             } else {
               const ev = ifaceAgent.parseLog(l);
-              recent.push(normalizeEvent({ ...ev, address: l.address, blockNumber: l.blockNumber, transactionHash: l.transactionHash }));
+              recent.push(
+                normalizeEvent({
+                  ...ev,
+                  address: l.address,
+                  blockNumber: l.blockNumber,
+                  transactionHash: l.transactionHash,
+                })
+              );
             }
           } catch {
             // ignore non-matching logs
           }
         }
+
         updateState({ recentEvents: recent });
       }
 
@@ -704,28 +751,42 @@ async function main() {
       if (Number(tickCount) % 10 === 0) {
         const bEmp = await tokenConn.balanceOf(employer.addr);
         const bTre = await tokenConn.balanceOf(treasury.addr);
-        console.log(`tick=${tickCount} employer=${ethers.formatUnits(bEmp, 18)} treasury=${ethers.formatUnits(bTre, 18)}`);
+        console.log(
+          `tick=${tickCount} employer=${ethers.formatUnits(bEmp, 18)} treasury=${ethers.formatUnits(bTre, 18)}`
+        );
       }
     } catch (e) {
-      // Handle common mempool issues gracefully (don’t escalate into nonce chaos)
       const msg = String(e?.shortMessage ?? e?.message ?? "");
-      if (msg.includes("replacement transaction underpriced") || msg.includes("replacement fee too low")) {
+
+      // Mempool conditions: don't spiral
+      if (
+        msg.includes("replacement transaction underpriced") ||
+        msg.includes("replacement fee too low") ||
+        msg.includes("could not coalesce error")
+      ) {
         console.error("tick mempool warning:", msg);
-        // short backoff to let mempool settle
-        backoffMs = Math.max(backoffMs, 1500);
-        setTimeout(() => { backoffMs = 0; }, backoffMs).unref?.();
+        backoffMs = Math.max(backoffMs, 2000);
+        setTimeout(() => {
+          backoffMs = 0;
+        }, backoffMs).unref?.();
         return;
       }
 
-      if (msg.includes("nonce too low") || msg.includes("nonce has already been used") || msg.includes("NONCE_EXPIRED")) {
+      // Nonce conditions: reset NonceManager to pending and chill
+      if (
+        msg.includes("nonce too low") ||
+        msg.includes("nonce has already been used") ||
+        msg.includes("NONCE_EXPIRED")
+      ) {
         console.error("tick nonce warning:", msg);
-        // reset managed nonce to pending nonce
         try {
-          const pending = await provider.getTransactionCount(await deployer.getAddress(), "pending");
-          managedDeployer.setNonce(pending);
+          const pendingNonce = await provider.getTransactionCount(await deployerEOA.getAddress(), "pending");
+          deployer.setNonce(pendingNonce);
         } catch {}
-        backoffMs = Math.max(backoffMs, 2000);
-        setTimeout(() => { backoffMs = 0; }, backoffMs).unref?.();
+        backoffMs = Math.max(backoffMs, 2500);
+        setTimeout(() => {
+          backoffMs = 0;
+        }, backoffMs).unref?.();
         return;
       }
 
@@ -733,11 +794,12 @@ async function main() {
       errorCount += 1;
       updateState({ errorCount, lastTickAt: Date.now(), lastTickError: { reason, data } });
       persistRuntime();
-      console.error("tick error:", reason || e);
+      console.error("tick error:", reason || msg || e);
 
-      // Exponential-ish backoff on unknown errors (protects public RPC)
-      backoffMs = Math.min(30_000, Math.max(1500, (backoffMs || 1500) * 2));
-      setTimeout(() => { backoffMs = 0; }, backoffMs).unref?.();
+      backoffMs = Math.min(30_000, Math.max(2000, (backoffMs || 2000) * 2));
+      setTimeout(() => {
+        backoffMs = 0;
+      }, backoffMs).unref?.();
     } finally {
       ticking = false;
     }

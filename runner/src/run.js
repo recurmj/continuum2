@@ -241,6 +241,18 @@ async function main() {
 
   const prior = RESUME ? readJsonIfExists(STATE_FILE) : null;
 
+  if (prior?.runtime?.authorizations && Array.isArray(prior.runtime.authorizations)) {
+  for (const a of prior.runtime.authorizations) {
+    if (!a?.authHash) continue;
+    auths.set(String(a.authHash).toLowerCase(), {
+      ...a,
+      authHash: String(a.authHash),
+      revoked: !!a.revoked,
+    });
+  }
+  console.log("Restored authorizations:", auths.size);
+}
+
   const canResume = async () => {
     try {
       if (!prior || !prior.addresses) return false;
@@ -684,16 +696,20 @@ const base = {
 
   let errorCount = Number(prior?.errorCount ?? 0);
 
-  function persistRuntime() {
-    try {
-      writeJsonAtomic(STATE_FILE, {
-        ...deploymentState,
-        lastBlock,
-        errorCount,
-        updatedAt: new Date().toISOString(),
-      });
-    } catch {}
-  }
+function persistRuntime() {
+  try {
+    writeJsonAtomic(STATE_FILE, {
+      ...deploymentState,
+      lastBlock,
+      errorCount,
+      updatedAt: new Date().toISOString(),
+      runtime: {
+        authorizations: Array.from(auths.values()),
+      },
+    });
+  } catch {}
+}
+
 
   setInterval(persistRuntime, 60_000).unref?.();
 

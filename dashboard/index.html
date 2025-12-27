@@ -403,7 +403,7 @@ function renderConsentHorizonFromState(state) {
 
   const remainingMs = computeConsentHorizonFromState(state);
 
-  if (remainingMs == null) { el.textContent = "—"; return; }
+  if (remainingMs == null) { el.textContent = "∞"; return; }
   if (remainingMs <= 0) { el.textContent = "expired"; return; }
 
   el.textContent = fmtDuration(remainingMs);
@@ -563,27 +563,26 @@ function uptimeStr(sec) {
 function renderTime(state) {
   if (!state) return;
 
-  const nowMs = Date.now();
-
-  // startedAt in your /state is unix seconds
-  const startedAtMs = state.startedAt ? state.startedAt * 1000 : null;
-
-  let lastTickAtMs = null;
-  if (state.lastTickAt) lastTickAtMs = state.lastTickAt > 1e12 ? state.lastTickAt : state.lastTickAt * 1000;
-
   const tickCount = Number(state.tickCount || 0);
-  const tickMs = Number(state.tickMs || 0);
 
-  const econTickSeconds = Number(state.econTickSeconds ?? 5); //minTickSeconds in World is 5
+  // startedAt in /state is unix seconds
+  const startedAtMs = state.startedAt ? Number(state.startedAt) * 1000 : null;
+  if (!startedAtMs) return;
+
+  // ECONOMIC TIME: decoupled from runner crank interval.
+  // Choose a stable semantic "economic seconds per tick".
+  // Prefer state.econTickSeconds if runner provides it; otherwise fall back to 5.
+  const econTickSeconds = Number(state.econTickSeconds ?? 5);
   const econMs = tickCount * econTickSeconds * 1000;
 
-  if (!startedAtMs || !tickMs) return;
+  // WALL TIME: actual elapsed since world started
+  const wallMs = Math.max(0, Date.now() - startedAtMs);
 
-const startedAtMs = state.startedAt ? state.startedAt * 1000 : null;
-const wallMs = startedAtMs ? (Date.now() - startedAtMs) : 0;
+  // "Non-advancing" time = wall time minus economic time
+  const pausedMs = Math.max(0, wallMs - econMs);
 
-const pausedMs = Math.max(0, wallMs - econMs);
-const eff = wallMs > 0 ? (econMs / wallMs) : 0;
+  // Efficiency = econ / wall
+  const eff = wallMs > 0 ? (econMs / wallMs) : 0;
 
   const wallEl = document.getElementById("wallTime");
   const econEl = document.getElementById("econTime");
@@ -595,6 +594,7 @@ const eff = wallMs > 0 ? (econMs / wallMs) : 0;
   if (pausedEl) pausedEl.textContent = fmtDuration(pausedMs);
   if (effEl) effEl.textContent = (eff * 100).toFixed(1) + "%";
 }
+
 
 function short(a) {
   if (!a) return "";

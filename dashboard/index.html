@@ -14,6 +14,34 @@
     .grid { display:grid; grid-template-columns: 1.15fr 0.85fr; gap:14px; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
     .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px 14px; }
+    .tooltip {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dotted #aaa;
+}
+
+.tooltip .tip {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: 125%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #111;
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  width: 260px;
+  z-index: 10;
+  transition: opacity 0.15s ease;
+}
+
+.tooltip:hover .tip {
+  visibility: visible;
+  opacity: 1;
+}
     .row { display:flex; gap:10px; flex-wrap:wrap; align-items:baseline; }
     .kpi { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; }
     .val { font-size:20px; font-weight:600; }
@@ -156,17 +184,26 @@
               <div class="val" id="econTime">—</div>
             </div>
             <div>
-              <div class="kpi">Paused / delayed</div>
+              <div class="kpi">Non-advancing time</div>
               <div class="val" id="pausedTime">—</div>
             </div>
             <div>
-              <div class="kpi">Efficiency</div>
+              <div class="kpi">
+  <span class="tooltip">
+    Efficiency ⓘ
+    <span class="tip">
+      <strong>Efficiency = Economic time ÷ Wall time</strong><br><br>
+      Shows how much real time resulted in valid on-chain ticks.<br>
+      Low efficiency means the system safely paused; not that it failed.
+    </span>
+  </span>
+</div>
               <div class="val" id="efficiency">—</div>
             </div>
           </div>
 
           <div class="small" style="margin-top:8px;">
-            Wall time always moves. Economic time advances only when <span class="mono">tickSafe()</span> succeeds on-chain.
+            Wall time always moves. Economic time advances only when on-chain rules permit action.
           </div>
         </div>
 

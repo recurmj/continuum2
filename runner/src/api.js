@@ -10,6 +10,7 @@ let STATE = {
   errorCount: 0,
   agents: {},
   recentEvents: []
+  authorizations: []
 };
 
 let META = {

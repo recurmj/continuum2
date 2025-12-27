@@ -66,7 +66,7 @@ svg#graph { overflow: visible; }
 }
 
 @keyframes dash {
-  to { stroke-dashoffset: -1000; }
+  to { stroke-dashoffset: 1000; }
 }
 
 .graph .edge {
@@ -85,9 +85,6 @@ svg#graph { overflow: visible; }
   animation: dash 2.2s linear infinite;
 }
 
-.graph .edge.rev.live {
-  animation-direction: reverse;
-}
 
 /* Flow-type coloring (only meaningful when live) */
 .graph .edge.live.salary { stroke: #2563eb; filter: drop-shadow(0 0 7px rgba(37,99,235,.28)); }
@@ -782,14 +779,7 @@ function renderGraph(state) {
     const k = edgeKey(a,b);
 const isLive = liveEdgesUntil.has(k);
 const typ = liveEdgesType.get(k) || "";
-
-const isMerchantToTreasury = a.startsWith("m") && b === "treasury";
-
-const revClass = isMerchantToTreasury ? " rev" : "";
-
-
-
-p.setAttribute("class", "edge" + (isLive ? " live" : "") + revClass + (isLive && typ ? " " + typ : ""));
+p.setAttribute("class", "edge" + (isLive ? " live" : "") + (isLive && typ ? " " + typ : ""));
     svg.appendChild(p);
   });
 

@@ -9,7 +9,7 @@ let STATE = {
   lastTickAt: null,
   errorCount: 0,
   agents: {},
-  recentEvents: []
+  recentEvents: [],
   authorizations: []
 };
 

@@ -689,7 +689,7 @@ const base = {
         subs: await Promise.all(subs.map(async (s) => ({ address: s.addr, balance: await bal(s.addr) }))),
       },
       shock: { tick: 5, contained: null, armed: true },
-      authorizations: Array.from(auths.values()).filter(a => a && a.authHash),
+      authorizations: Array.from(auths.values()),
     });
   }
 
@@ -857,11 +857,13 @@ function persistRuntime() {
 });
 
         for (const ev of recent) {
-  if (ev.type === "AuthorizationRevoked" && ev.authHash) {
-    const a = auths.get(ev.authHash);
-    if (a) a.revoked = true;
-    else auths.set(ev.authHash, { authHash: ev.authHash, revoked: true });
-  }
+if (ev.type === "AuthorizationRevoked" && ev.authHash) {
+  const k = String(ev.authHash).toLowerCase();
+  const a = auths.get(k);
+  if (a) a.revoked = true;
+  else auths.set(k, { authHash: ev.authHash, revoked: true });
+}
+
 }
 
       }

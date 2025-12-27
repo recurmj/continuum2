@@ -777,23 +777,21 @@ function renderGraph(state) {
     if (!A || !B) return;
 
     const p = document.createElementNS("http://www.w3.org/2000/svg","path");
-p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
-p.setAttribute("fill","none");
-
-const k = edgeKey(a,b);
+    p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
+    p.setAttribute("fill","none");
+    const k = edgeKey(a,b);
 const isLive = liveEdgesUntil.has(k);
 const typ = liveEdgesType.get(k) || "";
 
-// ✅ mark merchant -> treasury as reversed direction
 const isMerchantToTreasury = a.startsWith("m") && b === "treasury";
+
 const revClass = isMerchantToTreasury ? " rev" : "";
 
-p.setAttribute(
-  "class",
-  "edge" + (isLive ? " live" : "") + revClass + (isLive && typ ? " " + typ : "")
-);
 
-svg.appendChild(p);
+
+p.setAttribute("class", "edge" + (isLive ? " live" : "") + revClass + (isLive && typ ? " " + typ : ""));
+    svg.appendChild(p);
+  });
 
   // Node layer
   nodes.forEach(n=>{

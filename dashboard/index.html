@@ -95,6 +95,17 @@ svg#graph { overflow: visible; }
 
 #tick { transition: transform 120ms ease; }
 
+.tip{position:relative;display:inline-block;margin-left:6px;cursor:pointer;color:var(--muted)}
+.tipbox{
+  position:absolute;left:0;top:18px;z-index:50;
+  min-width:260px;max-width:360px;
+  background:#fff;border:1px solid var(--line);border-radius:10px;
+  padding:10px 12px;box-shadow:0 10px 30px rgba(0,0,0,.08);
+  font-size:12px;line-height:1.35;color:var(--fg);
+  opacity:0;transform:translateY(-2px);pointer-events:none;
+}
+.tip:hover .tipbox,.tip:focus .tipbox{opacity:1;transform:translateY(0);pointer-events:auto}
+
   </style>
 </head>
 <body>
@@ -214,13 +225,13 @@ svg#graph { overflow: visible; }
 
   <div class="val" id="observedticks">—</div>
 
-</div>
-
 <div>
 
   <div class="kpi">Observed pulls</div>
 
   <div class="val" id="observedpulls">—</div>
+
+</div>
 
 </div>
 
@@ -283,14 +294,15 @@ svg#graph { overflow: visible; }
         </div>
 
         <div style="height:10px;"></div>
-        //<div class="kpi">Balances</div>
-<span class="tooltip">
-    Balances ⓘ
-    <span class="tip">
-      <strong>Why is the employer balance often zero?</strong><br><br>
-      The employer does not hold funds. Each tick, it pulls only what it is authorized to pull and forwards it immediately to workers. No balance is retained, and no float is trusted. It acts as a conduit, not a custodian. <br>
+      <div class="kpi">
+  Balances
+  <span class="tip" tabindex="0" aria-label="Why employer is often 0?">ⓘ
+    <span class="tipbox">
+      The employer doesn’t hold funds. Each tick it pulls only what it is authorized to pull and forwards it immediately.
+      It acts as a conduit, not a custodian.
     </span>
   </span>
+</div>
         <div style="height:6px;"></div>
         <div class="log">
           <table id="balances">

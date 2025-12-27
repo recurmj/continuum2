@@ -166,6 +166,11 @@
           <div>
             <div class="kpi">Tick rate</div>
             <div class="val" id="tickrate">—</div>
+
+<div>
+  <div class="kpi">Observed pulls</div>
+  <div class="val" id="totalpulls">—</div>
+</div>
           </div>
         </div>
 
@@ -253,6 +258,48 @@
   </div>
 
 <script>
+
+const safeNum = (x) => {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const comma = (n) => {
+  try { return safeNum(n).toLocaleString("en-US"); }
+  catch { return String(n); }
+};
+
+// Persistent counter across polls (no state.json changes required)
+let totalPulls = 0;
+let seenPullTx = new Set(); // dedupe by tx hash (best-effort)
+
+// If you want persistence across refreshes, uncomment these 2 lines:
+// totalPulls = safeNum(localStorage.getItem("totalPulls"));
+// seenPullTx = new Set(JSON.parse(localStorage.getItem("seenPullTx") || "[]"));
+
+function countPullsFromRecentEvents(recentEvents) {
+  if (!Array.isArray(recentEvents) || recentEvents.length === 0) return;
+
+  for (const ev of recentEvents) {
+    const t = ev?.type || "";
+    if (t !== "PullExecuted" && t !== "PullExecutedDirect") continue;
+
+    // Dedupe: use tx hash if available; else fall back to a composite key
+    const key =
+      ev?.tx ||
+      `${t}|${ev?.authHash || ""}|${ev?.grantor || ""}|${ev?.grantee || ""}|${ev?.amount || ""}|${ev?.blockNumber || ""}`;
+
+    if (seenPullTx.has(key)) continue;
+    seenPullTx.add(key);
+    totalPulls += 1;
+  }
+
+  // If you want persistence across refreshes, uncomment:
+  // localStorage.setItem("totalPulls", String(totalPulls));
+  // localStorage.setItem("seenPullTx", JSON.stringify(Array.from(seenPullTx).slice(-5000)));
+}
+
+
 const fmt = (n) => {
   try {
     // balances are 18 decimals
@@ -487,6 +534,13 @@ async function poll() {
 
     renderBalances(s);
     renderEvents(s);
+
+// 1) accumulate pulls
+countPullsFromRecentEvents(s.recentEvents);
+
+// 2) render
+document.getElementById("totalpulls").textContent = comma(totalPulls);
+
     renderGraph(s);
 
   } catch (e) {

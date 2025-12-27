@@ -141,6 +141,35 @@
           </div>
         </div>
 
+                <!-- Wall time vs Economic time -->
+        <div style="height:12px;"></div>
+        <div class="card" style="background:#fff; padding:12px; border-radius:14px;">
+          <div class="kpi" style="margin-bottom:6px;">Time</div>
+
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <div class="kpi">Wall time</div>
+              <div class="val" id="wallTime">—</div>
+            </div>
+            <div>
+              <div class="kpi">Economic time</div>
+              <div class="val" id="econTime">—</div>
+            </div>
+            <div>
+              <div class="kpi">Paused / delayed</div>
+              <div class="val" id="pausedTime">—</div>
+            </div>
+            <div>
+              <div class="kpi">Efficiency</div>
+              <div class="val" id="efficiency">—</div>
+            </div>
+          </div>
+
+          <div class="small" style="margin-top:8px;">
+            Wall time always moves. Economic time advances only when <span class="mono">tickSafe()</span> succeeds on-chain.
+          </div>
+        </div>
+
         <div style="height:14px;"></div>
         <div class="kpi">Flow view</div>
         <svg id="graph" class="graph" viewBox="0 0 900 360" preserveAspectRatio="none"></svg>
@@ -211,6 +240,55 @@ function uptimeStr(sec) {
   parts.push(m+"m");
   parts.push(s+"s");
   return parts.join(" ");
+}
+
+  function fmtDuration(ms) {
+  ms = Math.max(0, Math.floor(ms));
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+
+  const parts = [];
+  if (d) parts.push(d + "d");
+  if (d || h) parts.push(h + "h");
+  parts.push(m + "m");
+  parts.push(sec + "s");
+  return parts.join(" ");
+}
+
+function renderTime(state) {
+  if (!state) return;
+
+  const nowMs = Date.now();
+
+  // startedAt in your /state is unix seconds
+  const startedAtMs = state.startedAt ? state.startedAt * 1000 : null;
+
+  // lastTickAt appears to be unix ms in your /state (13 digits), but handle seconds too
+  let lastTickAtMs = null;
+  if (state.lastTickAt) lastTickAtMs = state.lastTickAt > 1e12 ? state.lastTickAt : state.lastTickAt * 1000;
+
+  const tickCount = Number(state.tickCount || 0);
+  const tickMs = Number(state.tickMs || 0);
+
+  if (!startedAtMs || !tickMs) return;
+
+  const wallMs = nowMs - startedAtMs;
+  const econMs = tickCount * tickMs;
+  const pausedMs = Math.max(0, wallMs - econMs);
+  const eff = wallMs > 0 ? (econMs / wallMs) : 0;
+
+  const wallEl = document.getElementById("wallTime");
+  const econEl = document.getElementById("econTime");
+  const pausedEl = document.getElementById("pausedTime");
+  const effEl = document.getElementById("efficiency");
+
+  if (wallEl) wallEl.textContent = fmtDuration(wallMs);
+  if (econEl) econEl.textContent = fmtDuration(econMs);
+  if (pausedEl) pausedEl.textContent = fmtDuration(pausedMs);
+  if (effEl) effEl.textContent = (eff * 100).toFixed(1) + "%";
 }
 
 function short(a) {
@@ -358,6 +436,7 @@ async function poll() {
     document.getElementById("uptime").textContent = uptimeStr(s.uptimeSeconds || 0);
     document.getElementById("tick").textContent = String(s.tickCount ?? "—");
     document.getElementById("tickrate").textContent = (s.tickMs ? (s.tickMs/1000).toFixed(1)+"s" : "—");
+    renderTime(s);
 
     const add = s.addresses || {};
     document.getElementById("contracts").textContent =

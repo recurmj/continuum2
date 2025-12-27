@@ -241,17 +241,14 @@ async function main() {
 
   const prior = RESUME ? readJsonIfExists(STATE_FILE) : null;
 
-  if (prior?.runtime?.authorizations && Array.isArray(prior.runtime.authorizations)) {
+if (prior?.runtime?.authorizations && Array.isArray(prior.runtime.authorizations)) {
   for (const a of prior.runtime.authorizations) {
     if (!a?.authHash) continue;
-    auths.set(String(a.authHash).toLowerCase(), {
-      ...a,
-      authHash: String(a.authHash),
-      revoked: !!a.revoked,
-    });
+    auths.set(String(a.authHash).toLowerCase(), { ...a, revoked: !!a.revoked });
   }
   console.log("Restored authorizations:", auths.size);
 }
+
 
   const canResume = async () => {
     try {
@@ -412,7 +409,7 @@ async function signPPO({ grantorAgent, granteeAddr, maxPerPull, validAfter, vali
 
   const authHash = digest; // <- this is your canonical id in this runner’s const k = authHash.toLowerCase();
 
-auths.set(k, {
+auths.set(authHash.toLowerCase(), {
   authHash,
   grantor: fields.grantor,
   grantee: fields.grantee,
@@ -708,6 +705,7 @@ function persistRuntime() {
     });
   } catch {}
 }
+
 
 
   setInterval(persistRuntime, 60_000).unref?.();

@@ -410,18 +410,17 @@ async function signPPO({ grantorAgent, granteeAddr, maxPerPull, validAfter, vali
   const digest = digestFor(sh);
   const sig = grantorAgent.owner.signingKey.sign(digest).serialized;
 
-  const authHash = digest; // <- this is your canonical id in this runner’s world
+  const authHash = digest; // <- this is your canonical id in this runner’s const k = authHash.toLowerCase();
 
-  // Store for /state (numbers for UI convenience)
-  auths.set(authHash, {
-    authHash,
-    grantor: fields.grantor,
-    grantee: fields.grantee,
-    token: fields.token,
-    validAfter: Number(fields.validAfter),
-    validBefore: Number(fields.validBefore),
-    revoked: false,
-  });
+auths.set(k, {
+  authHash,
+  grantor: fields.grantor,
+  grantee: fields.grantee,
+  token: fields.token,
+  validAfter: Number(fields.validAfter),
+  validBefore: Number(fields.validBefore),
+  revoked: false,
+});
 
   return { fields, sig, authHash };
 }

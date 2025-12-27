@@ -85,6 +85,10 @@ svg#graph { overflow: visible; }
   animation: dash 2.2s linear infinite;
 }
 
+.graph .edge.rev.live {
+  animation-direction: reverse;
+}
+
 /* Flow-type coloring (only meaningful when live) */
 .graph .edge.live.salary { stroke: #2563eb; filter: drop-shadow(0 0 7px rgba(37,99,235,.28)); }
 .graph .edge.live.spend  { stroke: #16a34a; filter: drop-shadow(0 0 7px rgba(22,163,74,.24)); }
@@ -773,14 +777,23 @@ function renderGraph(state) {
     if (!A || !B) return;
 
     const p = document.createElementNS("http://www.w3.org/2000/svg","path");
-    p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
-    p.setAttribute("fill","none");
-    const k = edgeKey(a,b);
+p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
+p.setAttribute("fill","none");
+
+const k = edgeKey(a,b);
 const isLive = liveEdgesUntil.has(k);
 const typ = liveEdgesType.get(k) || "";
-p.setAttribute("class", "edge" + (isLive ? " live" : "") + (isLive && typ ? " " + typ : ""));
-    svg.appendChild(p);
-  });
+
+// ✅ mark merchant -> treasury as reversed direction
+const isMerchantToTreasury = a.startsWith("m") && b === "treasury";
+const revClass = isMerchantToTreasury ? " rev" : "";
+
+p.setAttribute(
+  "class",
+  "edge" + (isLive ? " live" : "") + revClass + (isLive && typ ? " " + typ : "")
+);
+
+svg.appendChild(p);
 
   // Node layer
   nodes.forEach(n=>{

@@ -56,6 +56,45 @@
     .graph { width:100%; height:310px; border:1px solid var(--line); background:#fff; border-radius:12px; }
     .small { font-size:12px; color:var(--muted); }
     a { color:inherit; }
+
+/* ---- Alive graph styling ---- */
+svg#graph { overflow: visible; }
+
+@keyframes breathe {
+  0%, 100% { filter: drop-shadow(0 0 0px rgba(80,120,255,.0)); opacity: .92; }
+  50% { filter: drop-shadow(0 0 10px rgba(80,120,255,.35)); opacity: 1; }
+}
+
+@keyframes dash {
+  to { stroke-dashoffset: -1000; }
+}
+
+.graph .edge {
+  stroke: #d0d4dc;
+  stroke-width: 1.2;
+  opacity: .55;
+}
+
+.graph .edge.live {
+  stroke-width: 1.6;
+  opacity: .85;
+  stroke-dasharray: 6 10;
+  animation: dash 2.2s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(80,120,255,.25));
+}
+
+.graph .nodeCircle {
+  animation: breathe 3.8s ease-in-out infinite;
+}
+
+.graph .nodeCircle.employer { animation-delay: .0s; }
+.graph .nodeCircle.treasury { animation-delay: .4s; }
+.graph .nodeCircle.worker { animation-delay: .8s; }
+.graph .nodeCircle.merchant { animation-delay: 1.2s; }
+.graph .nodeCircle.sub { animation-delay: 1.6s; }
+
+#tick { transition: transform 120ms ease; }
+
   </style>
 </head>
 <body>
@@ -168,9 +207,21 @@
             <div class="val" id="tickrate">—</div>
 
 <div>
-  <div class="kpi"><br>Observed pulls</br></div>
-  <div class="val" id="totalpulls">—</div>
+
+  <div class="kpi">Observed ticks</div>
+
+  <div class="val" id="observedticks">—</div>
+
 </div>
+
+<div>
+
+  <div class="kpi">Observed pulls</div>
+
+  <div class="val" id="observedpulls">—</div>
+
+</div>
+
           </div>
         </div>
 
@@ -258,6 +309,83 @@
   </div>
 
 <script>
+
+  const safeNum = (x) => {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const comma = (n) => {
+  try { return safeNum(n).toLocaleString("en-US"); }
+  catch { return String(n); }
+};
+
+// ---- Observed counters (session + optional persistence) ----
+let observedPulls = 0;
+let observedTicks = 0;
+
+// We dedupe pulls by tx+logIndex (best), or by a composite key if logIndex missing.
+// We dedupe ticks by tx (each tickSafe is one tx).
+let seenPullKeys = new Set();
+let seenTickTx = new Set();
+
+// persist across refresh (recommended)
+try {
+  observedPulls = safeNum(localStorage.getItem("observedPulls"));
+  observedTicks = safeNum(localStorage.getItem("observedTicks"));
+  seenPullKeys = new Set(JSON.parse(localStorage.getItem("seenPullKeys") || "[]"));
+  seenTickTx = new Set(JSON.parse(localStorage.getItem("seenTickTx") || "[]"));
+} catch { /* ignore */ }
+
+function saveObserved() {
+  try {
+    localStorage.setItem("observedPulls", String(observedPulls));
+    localStorage.setItem("observedTicks", String(observedTicks));
+    // cap sets to avoid unbounded growth
+    localStorage.setItem("seenPullKeys", JSON.stringify(Array.from(seenPullKeys).slice(-8000)));
+    localStorage.setItem("seenTickTx", JSON.stringify(Array.from(seenTickTx).slice(-4000)));
+  } catch { /* ignore */ }
+}
+
+// ---- Core counting ----
+function accumulateObservedFromRecentEvents(recentEvents) {
+  if (!Array.isArray(recentEvents) || recentEvents.length === 0) return;
+
+  for (const ev of recentEvents) {
+    const type = ev?.type || "";
+    const tx = ev?.tx || "";
+    const logIndex = ev?.logIndex;
+
+    // Count ticks: use the tick tx if the runner emits it as a Tick event
+    // If you don't have a Tick event type, we can still infer ticks by counting unique txs
+    // that include any event emitted during tickSafe.
+    if (tx) {
+      if (!seenTickTx.has(tx)) {
+        seenTickTx.add(tx);
+        observedTicks += 1;
+      }
+    }
+
+    // Count pulls: PullExecuted + PullExecutedDirect
+    if (type === "PullExecuted" || type === "PullExecutedDirect") {
+      // Best key: tx:logIndex
+      let key = "";
+      if (tx && (logIndex !== undefined && logIndex !== null)) {
+        key = `${tx}:${logIndex}`;
+      } else {
+        // Fallback composite if logIndex isn't available from runner
+        key = `${tx}|${type}|${ev?.authHash || ""}|${ev?.grantor || ""}|${ev?.grantee || ""}|${ev?.amount || ""}|${ev?.blockNumber || ""}`;
+      }
+
+      if (!seenPullKeys.has(key)) {
+        seenPullKeys.add(key);
+        observedPulls += 1;
+      }
+    }
+  }
+
+  saveObserved();
+}
 
 const safeNum = (x) => {
   const n = Number(x);
@@ -424,78 +552,122 @@ function renderEvents(state) {
   }).join("");
 }
 
+let liveEdgesUntil = new Map(); // edgeKey -> ms timestamp
+
+function edgeKey(from, to) { return `${from}->${to}`; }
+
+// Map addresses -> node ids we use in the graph
+function buildAddrToNodeId(state) {
+  const m = new Map();
+  const a = state.agents || {};
+  if (a.employer?.address) m.set(a.employer.address.toLowerCase(), "employer");
+  if (a.treasury?.address) m.set(a.treasury.address.toLowerCase(), "treasury");
+
+  (a.workers || []).forEach((w,i)=>{ if (w?.address) m.set(w.address.toLowerCase(), `w${i}`); });
+  (a.merchants || []).forEach((x,i)=>{ if (x?.address) m.set(x.address.toLowerCase(), `m${i}`); });
+  (a.subs || []).forEach((x,i)=>{ if (x?.address) m.set(x.address.toLowerCase(), `s${i}`); });
+
+  return m;
+}
+
+// Call this inside poll() after you have s.recentEvents
+function markLiveEdgesFromEvents(state) {
+  const now = Date.now();
+  const addrToId = buildAddrToNodeId(state);
+  const evs = state.recentEvents || [];
+
+  for (const ev of evs) {
+    const t = ev?.type || "";
+    if (t !== "PullExecuted" && t !== "PullExecutedDirect") continue;
+
+    const from = (ev.grantor || "").toLowerCase();
+    const to   = (ev.grantee || "").toLowerCase();
+
+    const fromId = addrToId.get(from);
+    const toId   = addrToId.get(to);
+
+    if (fromId && toId) {
+      liveEdgesUntil.set(edgeKey(fromId, toId), now + 3500); // glow for 3.5s
+    }
+  }
+
+  // cleanup old
+  for (const [k, until] of liveEdgesUntil.entries()) {
+    if (until < now) liveEdgesUntil.delete(k);
+  }
+}
+
 function renderGraph(state) {
   const svg = document.getElementById("graph");
+  svg.classList.add("graph");
+
   const W = 900, H = 360;
   svg.innerHTML = "";
 
   // Nodes
   const nodes = [];
-  const addNode = (id, label, x, y) => nodes.push({id,label,x,y});
+  const addNode = (id, label, x, y, cls) => nodes.push({id,label,x,y,cls});
 
-  addNode("employer","Employer", 170, 90);
-  addNode("treasury","Treasury", 170, 270);
+  addNode("employer","Employer", 170, 90, "employer");
+  addNode("treasury","Treasury", 170, 270, "treasury");
 
-  // workers left to right
   const wcount = (state.agents?.workers ?? []).length || 10;
   for (let i=0;i<wcount;i++){
     const x = 420 + (i%5)*90;
     const y = 60 + Math.floor(i/5)*90;
-    addNode("w"+i, "W"+(i+1), x, y);
+    addNode("w"+i, "W"+(i+1), x, y, "worker");
   }
 
   const mcount = (state.agents?.merchants ?? []).length || 3;
   for (let i=0;i<mcount;i++){
-    addNode("m"+i, "M"+(i+1), 700, 210 + i*45);
+    addNode("m"+i, "M"+(i+1), 700, 210 + i*45, "merchant");
   }
 
   const scount = (state.agents?.subs ?? []).length || 2;
   for (let i=0;i<scount;i++){
-    addNode("s"+i, "S"+(i+1), 700, 80 + i*45);
+    addNode("s"+i, "S"+(i+1), 700, 80 + i*45, "sub");
   }
 
   // Edges (conceptual)
   const edges = [];
-  // employer -> workers (salary pulled by workers)
-  for (let i=0;i<wcount;i++) edges.push(["employer","w"+i,"salary"]);
-  // workers -> merchants
-  for (let i=0;i<wcount;i++) for (let j=0;j<mcount;j++) edges.push(["w"+i,"m"+j,"spend"]);
-  // workers -> subs
-  for (let i=0;i<wcount;i++) for (let j=0;j<scount;j++) edges.push(["w"+i,"s"+j,"sub"]);
-  // merchants -> treasury
-  for (let j=0;j<mcount;j++) edges.push(["m"+j,"treasury","remit"]);
-  // treasury -> employer
-  edges.push(["treasury","employer","drip"]);
+  for (let i=0;i<wcount;i++) edges.push(["employer","w"+i]);
+  for (let i=0;i<wcount;i++) for (let j=0;j<mcount;j++) edges.push(["w"+i,"m"+j]);
+  for (let i=0;i<wcount;i++) for (let j=0;j<scount;j++) edges.push(["w"+i,"s"+j]);
+  for (let j=0;j<mcount;j++) edges.push(["m"+j,"treasury"]);
+  edges.push(["treasury","employer"]);
 
   const nodeById = Object.fromEntries(nodes.map(n=>[n.id,n]));
 
-  const line = (x1,y1,x2,y2) => {
-    const p = document.createElementNS("http://www.w3.org/2000/svg","path");
+  const makePath = (x1,y1,x2,y2) => {
     const dx = (x2-x1), dy=(y2-y1);
     const c1x = x1 + dx*0.35, c1y = y1 + dy*0.05;
     const c2x = x1 + dx*0.65, c2y = y1 + dy*0.95;
-    p.setAttribute("d", `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`);
-    p.setAttribute("fill","none");
-    p.setAttribute("stroke","#d0d4dc");
-    p.setAttribute("stroke-width","1");
-    return p;
+    return `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`;
   };
 
-  edges.slice(0, 220).forEach(([a,b])=>{
+  // Edge layer
+  edges.slice(0, 260).forEach(([a,b])=>{
     const A=nodeById[a], B=nodeById[b];
     if (!A || !B) return;
-    svg.appendChild(line(A.x,A.y,B.x,B.y));
+
+    const p = document.createElementNS("http://www.w3.org/2000/svg","path");
+    p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
+    p.setAttribute("fill","none");
+    p.setAttribute("class", "edge" + (liveEdgesUntil.has(edgeKey(a,b)) ? " live" : ""));
+    svg.appendChild(p);
   });
 
-  // nodes on top
+  // Node layer
   nodes.forEach(n=>{
     const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+
     const c = document.createElementNS("http://www.w3.org/2000/svg","circle");
     c.setAttribute("cx", n.x);
     c.setAttribute("cy", n.y);
     c.setAttribute("r", 14);
     c.setAttribute("fill", "#ffffff");
     c.setAttribute("stroke", "#cfd5df");
+    c.setAttribute("class", `nodeCircle ${n.cls}`);
     g.appendChild(c);
 
     const t = document.createElementNS("http://www.w3.org/2000/svg","text");
@@ -506,6 +678,7 @@ function renderGraph(state) {
     t.setAttribute("fill","#2c2f36");
     t.textContent = n.label;
     g.appendChild(t);
+
     svg.appendChild(g);
   });
 }
@@ -519,6 +692,11 @@ async function poll() {
 
     document.getElementById("uptime").textContent = uptimeStr(s.uptimeSeconds || 0);
     document.getElementById("tick").textContent = String(s.tickCount ?? "—");
+
+const tickEl = document.getElementById("tick");
+tickEl.style.transform = "scale(1.03)";
+setTimeout(()=>tickEl.style.transform="scale(1)", 120);
+
     document.getElementById("tickrate").textContent = (s.tickMs ? (s.tickMs/1000).toFixed(1)+"s" : "—");
     renderTime(s);
 
@@ -535,13 +713,19 @@ async function poll() {
     renderBalances(s);
     renderEvents(s);
 
+accumulateObservedFromRecentEvents(s.recentEvents);
+
+document.getElementById("observedpulls").textContent = comma(observedPulls);
+document.getElementById("observedticks").textContent = comma(observedTicks);
+
 // 1) accumulate pulls
 countPullsFromRecentEvents(s.recentEvents);
 
 // 2) render
 document.getElementById("totalpulls").textContent = comma(totalPulls);
 
-    renderGraph(s);
+markLiveEdgesFromEvents(s);
+renderGraph(s);
 
   } catch (e) {
     setStatus(false);

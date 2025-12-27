@@ -230,7 +230,7 @@ svg#graph { overflow: visible; }
 
 <div>
 
-  <div class="kpi">Observed txs</div>
+  <div class="kpi">Observed time advances</div>
 
   <div class="val" id="observedticks">—</div>
 
@@ -245,6 +245,34 @@ svg#graph { overflow: visible; }
 
 
 </div>
+
+
+
+<div>
+
+  <div class="kpi">
+
+    Consent horizon
+
+    <span class="tip" tabindex="0">ⓘ
+
+      <span class="tipbox">
+
+        Time remaining until the next authorization expires.
+
+        When a consent expires, its flows automatically stop.
+
+      </span>
+
+    </span>
+
+  </div>
+
+  <div class="val" id="consentHorizon">—</div>
+
+</div>
+
+
 
 </div>
 
@@ -345,6 +373,59 @@ svg#graph { overflow: visible; }
   </div>
 
 <script>
+
+// ---- Consent horizon tracking ----
+
+// authHash -> validBefore (ms)
+let activeConsents = new Map();
+
+function updateConsentsFromEvents(recentEvents) {
+  if (!Array.isArray(recentEvents)) return;
+
+  for (const ev of recentEvents) {
+    if (ev.type === "AuthorizationCreated" && ev.authHash && ev.validBefore) {
+      // validBefore expected as unix seconds
+      activeConsents.set(ev.authHash, ev.validBefore * 1000);
+    }
+
+    if (ev.type === "AuthorizationRevoked" && ev.authHash) {
+      activeConsents.delete(ev.authHash);
+    }
+  }
+}
+
+function computeConsentHorizon() {
+  const now = Date.now();
+  let soonest = Infinity;
+
+  for (const expiryMs of activeConsents.values()) {
+    if (expiryMs > now && expiryMs < soonest) {
+      soonest = expiryMs;
+    }
+  }
+
+  if (soonest === Infinity) return null;
+  return soonest - now;
+}
+
+function renderConsentHorizon() {
+  const el = document.getElementById("consentHorizon");
+  if (!el) return;
+
+  const remainingMs = computeConsentHorizon();
+
+  if (remainingMs === null) {
+    el.textContent = "—";
+    return;
+  }
+
+  if (remainingMs <= 0) {
+    el.textContent = "expired";
+    return;
+  }
+
+  el.textContent = fmtDuration(remainingMs);
+}
 
   const safeNum = (x) => {
   const n = Number(x);
@@ -761,6 +842,9 @@ accumulateObservedFromRecentEvents(s.recentEvents);
 
 document.getElementById("observedpulls").textContent = comma(observedPulls);
 document.getElementById("observedticks").textContent = comma(observedTicks);
+
+updateConsentsFromEvents(s.recentEvents);
+renderConsentHorizon();
 
 markLiveEdgesFromEvents(s);
 renderGraph(s);

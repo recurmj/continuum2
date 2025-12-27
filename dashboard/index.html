@@ -225,15 +225,21 @@ svg#graph { overflow: visible; }
 
   <div class="val" id="observedticks">—</div>
 
+
+
 <div>
 
   <div class="kpi">Observed pulls</div>
 
   <div class="val" id="observedpulls">—</div>
 
+
+
 </div>
 
 </div>
+
+
 
           </div>
         </div>
@@ -407,16 +413,6 @@ function accumulateObservedFromRecentEvents(recentEvents) {
 
   saveObserved();
 }
-
-const safeNum = (x) => {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : 0;
-};
-
-const comma = (n) => {
-  try { return safeNum(n).toLocaleString("en-US"); }
-  catch { return String(n); }
-};
 
 // Persistent counter across polls (no state.json changes required)
 let totalPulls = 0;

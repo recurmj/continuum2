@@ -28,6 +28,7 @@ const MNEMONIC =
   process.env.MNEMONIC ??
   "test test test test test test test test test test test junk";
 
+const auths = new Map(); // authHash -> {authHash, grantor, grantee, validAfter, validBefore, revoked}
 const TICK_MS = Number(process.env.TICK_MS ?? "1000");
 const API_PORT = Number(process.env.PORT ?? "8787");
 const STATE_FILE = process.env.STATE_FILE ?? "./state.json";
@@ -369,25 +370,50 @@ async function main() {
     );
   }
 
+function authHashFor(fields) {
+  // IMPORTANT: this must match whatever your contracts treat as the authHash.
+  // In your setup, authHash == digest == keccak(0x1901||domainSep||structHash).
+  const sh = structHashFor(fields);
+  return digestFor(sh);
+}
+
+  
+
   function digestFor(structHash) {
     return keccak(concat("0x1901", domainSep, structHash));
   }
 
-  async function signPPO({ grantorAgent, granteeAddr, maxPerPull, validAfter, validBefore, nonce }) {
-    const fields = {
-      grantor: grantorAgent.addr,
-      grantee: granteeAddr,
-      token: await token.getAddress(),
-      maxPerPull,
-      validAfter,
-      validBefore,
-      nonce,
-    };
-    const sh = structHashFor(fields);
-    const digest = digestFor(sh);
-    const sig = grantorAgent.owner.signingKey.sign(digest).serialized;
-    return { fields, sig };
-  }
+async function signPPO({ grantorAgent, granteeAddr, maxPerPull, validAfter, validBefore, nonce }) {
+  const fields = {
+    grantor: grantorAgent.addr,
+    grantee: granteeAddr,
+    token: await token.getAddress(),
+    maxPerPull,
+    validAfter,
+    validBefore,
+    nonce,
+  };
+
+  const sh = structHashFor(fields);
+  const digest = digestFor(sh);
+  const sig = grantorAgent.owner.signingKey.sign(digest).serialized;
+
+  const authHash = digest; // <- this is your canonical id in this runner’s world
+
+  // Store for /state (numbers for UI convenience)
+  auths.set(authHash, {
+    authHash,
+    grantor: fields.grantor,
+    grantee: fields.grantee,
+    token: fields.token,
+    validAfter: Number(fields.validAfter),
+    validBefore: Number(fields.validBefore),
+    revoked: false,
+  });
+
+  return { fields, sig, authHash };
+}
+
 
   async function addEdgeToGrantee({ granteeAgent, authFields, sig, amountPerTick, periodTicks, startTick }) {
     const auth = {
@@ -601,12 +627,14 @@ async function main() {
   ];
 
   function normalizeEvent(ev) {
-    const base = {
-      address: ev.address,
-      blockNumber: ev.blockNumber,
-      tx: ev.transactionHash,
-      type: ev.name,
-    };
+const base = {
+  address: ev.address,
+  blockNumber: ev.blockNumber,
+  tx: ev.transactionHash,
+  logIndex: ev.logIndex ?? null,
+  type: ev.name,
+};
+
     const a = ev.args ?? [];
     if (ev.name === "PullExecutedDirect") {
       return { ...base, authHash: a[0], token: a[1], grantor: a[2], grantee: a[3], amount: a[4].toString() };
@@ -622,6 +650,7 @@ async function main() {
         cumulative: a[5].toString(),
       };
     }
+
     if (ev.name === "AuthorizationRevoked") {
       return { ...base, authHash: a[0], grantor: a[1], timestamp: a[2].toString() };
     }
@@ -636,6 +665,7 @@ async function main() {
 
   async function snapshot(tickCount) {
     const bal = async (addr) => (await tokenConn.balanceOf(addr)).toString();
+
     updateState({
       tickCount: Number(tickCount),
       tickMs: TICK_MS,
@@ -648,6 +678,7 @@ async function main() {
         subs: await Promise.all(subs.map(async (s) => ({ address: s.addr, balance: await bal(s.addr) }))),
       },
       shock: { tick: 5, contained: null, armed: true },
+      authorizations: Array.from(auths.values()).filter(a => a && a.authHash),
     });
   }
 
@@ -806,6 +837,18 @@ async function main() {
           } catch {}
         }
         updateState({ recentEvents: recent });
+        updateState({
+  authorizations: Array.from(auths.values()).filter(a => a && a.authHash),
+});
+
+        for (const ev of recent) {
+  if (ev.type === "AuthorizationRevoked" && ev.authHash) {
+    const a = auths.get(ev.authHash);
+    if (a) a.revoked = true;
+    else auths.set(ev.authHash, { authHash: ev.authHash, revoked: true });
+  }
+}
+
       }
 
       lastBlock = currentBlock;

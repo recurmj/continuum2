@@ -57,12 +57,12 @@
     .small { font-size:12px; color:var(--muted); }
     a { color:inherit; }
 
-/* ---- Alive graph styling ---- */
+/* ---- Alive graph styling (colored by flow type) ---- */
 svg#graph { overflow: visible; }
 
 @keyframes breathe {
   0%, 100% { filter: drop-shadow(0 0 0px rgba(80,120,255,.0)); opacity: .92; }
-  50% { filter: drop-shadow(0 0 10px rgba(80,120,255,.35)); opacity: 1; }
+  50% { filter: drop-shadow(0 0 10px rgba(80,120,255,.25)); opacity: 1; }
 }
 
 @keyframes dash {
@@ -75,13 +75,20 @@ svg#graph { overflow: visible; }
   opacity: .55;
 }
 
+/* Live edge baseline animation */
 .graph .edge.live {
-  stroke-width: 1.6;
-  opacity: .85;
+  stroke-width: 1.8;
+  opacity: .95;
   stroke-dasharray: 6 10;
   animation: dash 2.2s linear infinite;
-  filter: drop-shadow(0 0 6px rgba(80,120,255,.25));
 }
+
+/* Flow-type coloring (only meaningful when live) */
+.graph .edge.live.salary { stroke: #2563eb; filter: drop-shadow(0 0 7px rgba(37,99,235,.28)); }
+.graph .edge.live.spend  { stroke: #16a34a; filter: drop-shadow(0 0 7px rgba(22,163,74,.24)); }
+.graph .edge.live.sub    { stroke: #7c3aed; filter: drop-shadow(0 0 7px rgba(124,58,237,.22)); }
+.graph .edge.live.remit  { stroke: #ea580c; filter: drop-shadow(0 0 7px rgba(234,88,12,.22)); }
+.graph .edge.live.drip   { stroke: #0891b2; filter: drop-shadow(0 0 7px rgba(8,145,178,.22)); }
 
 .graph .nodeCircle {
   animation: breathe 3.8s ease-in-out infinite;
@@ -89,9 +96,9 @@ svg#graph { overflow: visible; }
 
 .graph .nodeCircle.employer { animation-delay: .0s; }
 .graph .nodeCircle.treasury { animation-delay: .4s; }
-.graph .nodeCircle.worker { animation-delay: .8s; }
+.graph .nodeCircle.worker   { animation-delay: .8s; }
 .graph .nodeCircle.merchant { animation-delay: 1.2s; }
-.graph .nodeCircle.sub { animation-delay: 1.6s; }
+.graph .nodeCircle.sub      { animation-delay: 1.6s; }
 
 #tick { transition: transform 120ms ease; }
 
@@ -221,7 +228,7 @@ svg#graph { overflow: visible; }
 
 <div>
 
-  <div class="kpi">Observed ticks</div>
+  <div class="kpi">Observed txs</div>
 
   <div class="val" id="observedticks">—</div>
 
@@ -569,11 +576,20 @@ function renderEvents(state) {
   }).join("");
 }
 
-let liveEdgesUntil = new Map(); // edgeKey -> ms timestamp
+let liveEdgesUntil = new Map();     // edgeKey -> ms timestamp
+let liveEdgesType  = new Map();     // edgeKey -> "salary" | "spend" | "sub" | "remit" | "drip"
 
 function edgeKey(from, to) { return `${from}->${to}`; }
 
-// Map addresses -> node ids we use in the graph
+function classifyEdge(fromId, toId) {
+  if (fromId === "employer" && toId.startsWith("w")) return "salary";
+  if (fromId.startsWith("w") && toId.startsWith("m")) return "spend";
+  if (fromId.startsWith("w") && toId.startsWith("s")) return "sub";
+  if (fromId.startsWith("m") && toId === "treasury") return "remit";
+  if (fromId === "treasury" && toId === "employer") return "drip";
+  return ""; // unknown / other
+}
+
 function buildAddrToNodeId(state) {
   const m = new Map();
   const a = state.agents || {};
@@ -587,7 +603,6 @@ function buildAddrToNodeId(state) {
   return m;
 }
 
-// Call this inside poll() after you have s.recentEvents
 function markLiveEdgesFromEvents(state) {
   const now = Date.now();
   const addrToId = buildAddrToNodeId(state);
@@ -604,13 +619,20 @@ function markLiveEdgesFromEvents(state) {
     const toId   = addrToId.get(to);
 
     if (fromId && toId) {
-      liveEdgesUntil.set(edgeKey(fromId, toId), now + 3500); // glow for 3.5s
+      const k = edgeKey(fromId, toId);
+      liveEdgesUntil.set(k, now + 3500);
+
+      const typ = classifyEdge(fromId, toId);
+      if (typ) liveEdgesType.set(k, typ);
     }
   }
 
   // cleanup old
   for (const [k, until] of liveEdgesUntil.entries()) {
-    if (until < now) liveEdgesUntil.delete(k);
+    if (until < now) {
+      liveEdgesUntil.delete(k);
+      liveEdgesType.delete(k);
+    }
   }
 }
 
@@ -670,7 +692,10 @@ function renderGraph(state) {
     const p = document.createElementNS("http://www.w3.org/2000/svg","path");
     p.setAttribute("d", makePath(A.x,A.y,B.x,B.y));
     p.setAttribute("fill","none");
-    p.setAttribute("class", "edge" + (liveEdgesUntil.has(edgeKey(a,b)) ? " live" : ""));
+    const k = edgeKey(a,b);
+const isLive = liveEdgesUntil.has(k);
+const typ = liveEdgesType.get(k) || "";
+p.setAttribute("class", "edge" + (isLive ? " live" : "") + (isLive && typ ? " " + typ : ""));
     svg.appendChild(p);
   });
 

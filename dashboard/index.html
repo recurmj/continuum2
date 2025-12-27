@@ -375,58 +375,40 @@ svg#graph { overflow: visible; }
 
 <script>
 
-// ---- Consent horizon tracking ----
+function computeConsentHorizonFromState(state) {
+  const auths = state?.authorizations;
+  if (!Array.isArray(auths) || auths.length === 0) return null;
 
-// authHash -> validBefore (ms)
-let activeConsents = new Map();
+  const nowSec = Math.floor(Date.now() / 1000);
+  let soonestSec = Infinity;
 
-function updateConsentsFromEvents(recentEvents) {
-  if (!Array.isArray(recentEvents)) return;
+  for (const a of auths) {
+    if (!a) continue;
+    if (a.revoked) continue;
 
-  for (const ev of recentEvents) {
-    if (ev.type === "AuthorizationCreated" && ev.authHash && ev.validBefore) {
-      // validBefore expected as unix seconds
-      activeConsents.set(ev.authHash, ev.validBefore * 1000);
-    }
+    const vb = Number(a.validBefore || 0);
+    if (!vb) continue;
 
-    if (ev.type === "AuthorizationRevoked" && ev.authHash) {
-      activeConsents.delete(ev.authHash);
-    }
-  }
-}
-
-function computeConsentHorizon() {
-  const now = Date.now();
-  let soonest = Infinity;
-
-  for (const expiryMs of activeConsents.values()) {
-    if (expiryMs > now && expiryMs < soonest) {
-      soonest = expiryMs;
-    }
+    // active future expiries only
+    if (vb > nowSec && vb < soonestSec) soonestSec = vb;
   }
 
-  if (soonest === Infinity) return null;
-  return soonest - now;
+  if (soonestSec === Infinity) return null;
+  return (soonestSec - nowSec) * 1000; // ms
 }
 
-function renderConsentHorizon() {
+function renderConsentHorizonFromState(state) {
   const el = document.getElementById("consentHorizon");
   if (!el) return;
 
-  const remainingMs = computeConsentHorizon();
+  const remainingMs = computeConsentHorizonFromState(state);
 
-  if (remainingMs === null) {
-    el.textContent = "—";
-    return;
-  }
-
-  if (remainingMs <= 0) {
-    el.textContent = "expired";
-    return;
-  }
+  if (remainingMs == null) { el.textContent = "—"; return; }
+  if (remainingMs <= 0) { el.textContent = "expired"; return; }
 
   el.textContent = fmtDuration(remainingMs);
 }
+
 
   const safeNum = (x) => {
   const n = Number(x);
@@ -844,8 +826,8 @@ accumulateObservedFromRecentEvents(s.recentEvents);
 document.getElementById("observedpulls").textContent = comma(observedPulls);
 document.getElementById("observedticks").textContent = comma(observedTicks);
 
-updateConsentsFromEvents(s.recentEvents);
-renderConsentHorizon();
+renderConsentHorizonFromState(s);
+
 
 markLiveEdgesFromEvents(s);
 renderGraph(s);

@@ -568,19 +568,22 @@ function renderTime(state) {
   // startedAt in your /state is unix seconds
   const startedAtMs = state.startedAt ? state.startedAt * 1000 : null;
 
-  // lastTickAt appears to be unix ms in your /state (13 digits), but handle seconds too
   let lastTickAtMs = null;
   if (state.lastTickAt) lastTickAtMs = state.lastTickAt > 1e12 ? state.lastTickAt : state.lastTickAt * 1000;
 
   const tickCount = Number(state.tickCount || 0);
   const tickMs = Number(state.tickMs || 0);
 
+  const econTickSeconds = Number(state.econTickSeconds ?? 5); //minTickSeconds in World is 5
+  const econMs = tickCount * econTickSeconds * 1000;
+
   if (!startedAtMs || !tickMs) return;
 
-  const wallMs = nowMs - startedAtMs;
-  const econMs = tickCount * tickMs;
-  const pausedMs = Math.max(0, wallMs - econMs);
-  const eff = wallMs > 0 ? (econMs / wallMs) : 0;
+const startedAtMs = state.startedAt ? state.startedAt * 1000 : null;
+const wallMs = startedAtMs ? (Date.now() - startedAtMs) : 0;
+
+const pausedMs = Math.max(0, wallMs - econMs);
+const eff = wallMs > 0 ? (econMs / wallMs) : 0;
 
   const wallEl = document.getElementById("wallTime");
   const econEl = document.getElementById("econTime");

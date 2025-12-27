@@ -153,10 +153,12 @@ svg#graph { overflow: visible; }
     automation where outcomes are constrained by on-chain consent, not by the discretion of an executor.
   </p>
 
-    <h2 style="margin: 18px 0 8px; font-size: 18px;">Why is the employer balance often zero?</h2>
+<!--
+   <h2 style="margin: 18px 0 8px; font-size: 18px;">Why is the employer balance often zero?</h2>
   <p style="margin: 0 0 10px; font-size: 15px; line-height: 1.55;">
     The employer does not hold funds. Each tick, it pulls only what it is authorized to pull and forwards it immediately to workers. No balance is retained, and no float is trusted. It acts as a conduit, not a custodian.
   </p>
+-->
 
   <h2 style="margin: 18px 0 8px; font-size: 18px;">Verified contracts (Base Sepolia)</h2>
   <p style="margin: 0 0 10px; font-size: 14px; line-height: 1.55;">
@@ -281,7 +283,14 @@ svg#graph { overflow: visible; }
         </div>
 
         <div style="height:10px;"></div>
-        <div class="kpi">Balances</div>
+        //<div class="kpi">Balances</div>
+<span class="tooltip">
+    Balances ⓘ
+    <span class="tip">
+      <strong>Why is the employer balance often zero?</strong><br><br>
+      The employer does not hold funds. Each tick, it pulls only what it is authorized to pull and forwards it immediately to workers. No balance is retained, and no float is trusted. It acts as a conduit, not a custodian. <br>
+    </span>
+  </span>
         <div style="height:6px;"></div>
         <div class="log">
           <table id="balances">

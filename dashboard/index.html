@@ -739,12 +739,6 @@ accumulateObservedFromRecentEvents(s.recentEvents);
 document.getElementById("observedpulls").textContent = comma(observedPulls);
 document.getElementById("observedticks").textContent = comma(observedTicks);
 
-// 1) accumulate pulls
-countPullsFromRecentEvents(s.recentEvents);
-
-// 2) render
-document.getElementById("totalpulls").textContent = comma(totalPulls);
-
 markLiveEdgesFromEvents(s);
 renderGraph(s);
 
